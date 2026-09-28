@@ -4,7 +4,7 @@ import type { HaState, Registries } from "../ha/types";
 import { showTooltip, hideTooltip } from "../render/tooltip";
 import { nodeColor, randomizeColors, resetColors, getDomainColors, setDomainColors, setDomainColor, domainList } from "../render/colors";
 import { getEntityIconName, getCachedIcon, requestIcon, setIconResolveCallback } from "../render/icons";
-import { createTransform, applyWheel, screenToWorld, type ZoomTransform } from "./zoom";
+import { createTransform, applyWheel, zoomAt, screenToWorld, type ZoomTransform } from "./zoom";
 import { buildTree, buildTreeByDevice, flattenTree } from "../tree/build";
 import { loadCredentials, saveCredentials } from "../login";
 import { getRootElement } from "../rootElement";
@@ -60,6 +60,13 @@ let width = 0, height = 0;
 let dragNode: FNode | null = null;
 let panning = false;
 let panStartX = 0, panStartY = 0;
+// Pan inertia: velocity in screen px/ms, carried after release and decayed per frame.
+let panVelocityX = 0, panVelocityY = 0;
+let lastPanMoveTime = 0;
+let lastInertiaFrame = 0;
+const PAN_INERTIA_DECAY_MS = 325;
+const PAN_INERTIA_MIN_SPEED = 0.02;
+const PAN_RELEASE_IDLE_MS = 60;
 let transform: ZoomTransform = createTransform();
 
 let hoveredNode: FNode | null = null;
@@ -319,6 +326,7 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
       canvas = document.createElement("canvas");
       ctx = canvas.getContext("2d")!;
       canvas.style.display = "block";
+      canvas.style.touchAction = "none";
       canvas.style.width = "100%";
       canvas.style.height = "100%";
       container.appendChild(canvas);
@@ -339,10 +347,11 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
       setIconResolveCallback(() => ensureLoop());
 
       onMouseLeave = () => { dragNode = null; panning = false; hoveredNode = null; hideTooltip(); };
-      canvas.addEventListener("mousedown", onMouseDown);
-      canvas.addEventListener("mousemove", onMouseMove);
-      canvas.addEventListener("mouseup", onMouseUp);
-      canvas.addEventListener("mouseleave", onMouseLeave);
+      canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointermove", onPointerMove);
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointerleave", onMouseLeave);
+      canvas.addEventListener("pointercancel", onPointerCancel);
       canvas.addEventListener("wheel", onWheel, { passive: false });
       canvas.addEventListener("contextmenu", onContextMenu);
 
@@ -355,10 +364,11 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
       resizeObserver?.disconnect();
       resizeObserver = null;
       if (canvas) {
-        canvas.removeEventListener("mousedown", onMouseDown);
-        canvas.removeEventListener("mousemove", onMouseMove);
-        canvas.removeEventListener("mouseup", onMouseUp);
-        if (onMouseLeave) canvas.removeEventListener("mouseleave", onMouseLeave);
+        canvas.removeEventListener("pointerdown", onPointerDown);
+        canvas.removeEventListener("pointermove", onPointerMove);
+        canvas.removeEventListener("pointerup", onPointerUp);
+        if (onMouseLeave) canvas.removeEventListener("pointerleave", onMouseLeave);
+        canvas.removeEventListener("pointercancel", onPointerCancel);
         canvas.removeEventListener("wheel", onWheel);
         canvas.removeEventListener("contextmenu", onContextMenu);
         canvas = null;
@@ -1856,6 +1866,7 @@ function tick(): void {
   if (!canvas) return;
 
   updateFps(performance.now());
+  applyPanInertia(performance.now());
 
   if (alpha > 0.001) {
     simulate();
@@ -1867,7 +1878,7 @@ function tick(): void {
   // Constellation only animates per-frame when twinkle is on; otherwise the
   // settled graph is static and the loop stops until ensureLoop() wakes it.
   const hoverAnimating = hoveredNode !== null && performance.now() - hoverStartTime < 150;
-  const needsAnimation = alpha > 0.001 || glowTimestamps.size > 0 || dragNode !== null || panning ||
+  const needsAnimation = alpha > 0.001 || glowTimestamps.size > 0 || dragNode !== null || panning || panVelocityX !== 0 || panVelocityY !== 0 ||
     (settings.constellation && settings.twinkleSpeed > 0) ||
     settings.unavailableMode === "pulse" || hoverAnimating;
   if (needsAnimation) {
@@ -3007,9 +3018,73 @@ function onWheel(e: WheelEvent): void {
   ensureLoop();
 }
 
-function onMouseDown(e: MouseEvent): void {
+const DRAG_THRESHOLD_PX = 4;
+const activePointers = new Map<number, { x: number; y: number }>();
+let pinchDistance = 0;
+let pinchMidX = 0;
+let pinchMidY = 0;
+let pointerStartX = 0;
+let pointerStartY = 0;
+
+function pinchState(): { distance: number; midX: number; midY: number } {
+  const [a, b] = [...activePointers.values()];
+  return {
+    distance: Math.hypot(a.x - b.x, a.y - b.y),
+    midX: (a.x + b.x) / 2,
+    midY: (a.y + b.y) / 2,
+  };
+}
+
+function stopPanInertia(): void {
+  panVelocityX = 0;
+  panVelocityY = 0;
+}
+
+function applyPanInertia(now: number): void {
+  if (panVelocityX === 0 && panVelocityY === 0) return;
+  const dt = Math.min(now - lastInertiaFrame, 50);
+  lastInertiaFrame = now;
+  transform.x += panVelocityX * dt;
+  transform.y += panVelocityY * dt;
+  const decay = Math.exp(-dt / PAN_INERTIA_DECAY_MS);
+  panVelocityX *= decay;
+  panVelocityY *= decay;
+  if (Math.hypot(panVelocityX, panVelocityY) < PAN_INERTIA_MIN_SPEED) stopPanInertia();
+}
+
+function releaseDrag(): void {
+  if (dragNode) {
+    dragNode.fx = null;
+    dragNode.fy = null;
+    dragNode = null;
+  }
+  panning = false;
+}
+
+function onPointerCancel(e: PointerEvent): void {
+  activePointers.delete(e.pointerId);
+  releaseDrag();
+  stopPanInertia();
+  ensureLoop();
+}
+
+function onPointerDown(e: PointerEvent): void {
+  canvas?.setPointerCapture(e.pointerId);
+  stopPanInertia();
+  activePointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+  if (activePointers.size === 2) {
+    // A second finger turns any drag or pan into a pinch.
+    releaseDrag();
+    didDrag = true;
+    hideTooltip();
+    ({ distance: pinchDistance, midX: pinchMidX, midY: pinchMidY } = pinchState());
+    return;
+  }
+  if (activePointers.size > 2) return;
   dismissContextMenu();
   didDrag = false;
+  pointerStartX = e.clientX;
+  pointerStartY = e.clientY;
   const n = hitTest(e.offsetX, e.offsetY);
   if (n) {
     dragNode = n;
@@ -3020,20 +3095,46 @@ function onMouseDown(e: MouseEvent): void {
     panning = true;
     panStartX = e.clientX;
     panStartY = e.clientY;
+    lastPanMoveTime = e.timeStamp;
   }
   ensureLoop();
 }
 
-function onMouseMove(e: MouseEvent): void {
-  if (dragNode) {
+function onPointerMove(e: PointerEvent): void {
+  if (activePointers.has(e.pointerId)) {
+    activePointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+  }
+  if (activePointers.size >= 2) {
+    const pinch = pinchState();
+    if (pinchDistance > 0) zoomAt(transform, pinch.distance / pinchDistance, pinch.midX, pinch.midY);
+    transform.x += pinch.midX - pinchMidX;
+    transform.y += pinch.midY - pinchMidY;
+    ({ distance: pinchDistance, midX: pinchMidX, midY: pinchMidY } = pinch);
+    ensureLoop();
+    return;
+  }
+  if ((dragNode || panning) && !didDrag
+    && Math.hypot(e.clientX - pointerStartX, e.clientY - pointerStartY) > DRAG_THRESHOLD_PX) {
     didDrag = true;
+  }
+  if (dragNode) {
+    if (!didDrag) return;
     const world = screenToWorld(transform, e.offsetX, e.offsetY);
     dragNode.fx = world.x;
     dragNode.fy = world.y;
     alpha = Math.max(alpha, 0.1);
   } else if (panning) {
-    transform.x += e.clientX - panStartX;
-    transform.y += e.clientY - panStartY;
+    const dx = e.clientX - panStartX;
+    const dy = e.clientY - panStartY;
+    const dt = e.timeStamp - lastPanMoveTime;
+    if (dt > 0) {
+      // Smooth over recent moves so one jittery event does not set the fling speed.
+      panVelocityX = panVelocityX * 0.2 + (dx / dt) * 0.8;
+      panVelocityY = panVelocityY * 0.2 + (dy / dt) * 0.8;
+    }
+    lastPanMoveTime = e.timeStamp;
+    transform.x += dx;
+    transform.y += dy;
     panStartX = e.clientX;
     panStartY = e.clientY;
   }
@@ -3065,7 +3166,15 @@ function onMouseMove(e: MouseEvent): void {
   if (changed) ensureLoop();
 }
 
-function onMouseUp(e: MouseEvent): void {
+function onPointerUp(e: PointerEvent): void {
+  const wasPinch = activePointers.size >= 2;
+  activePointers.delete(e.pointerId);
+  if (wasPinch) {
+    // Lifting one finger of a pinch must not start a pan from a stale position.
+    releaseDrag();
+    ensureLoop();
+    return;
+  }
   if (dragNode) {
     if (!didDrag) {
       if (e.shiftKey && isCollapsible(dragNode.tree)) {
@@ -3077,6 +3186,13 @@ function onMouseUp(e: MouseEvent): void {
     dragNode.fx = null;
     dragNode.fy = null;
     dragNode = null;
+  }
+  // Only fling when the pointer was still moving at release; a pause before
+  // letting go means the user meant to stop.
+  if (panning && didDrag && e.timeStamp - lastPanMoveTime < PAN_RELEASE_IDLE_MS) {
+    lastInertiaFrame = performance.now();
+  } else {
+    stopPanInertia();
   }
   panning = false;
   ensureLoop();
