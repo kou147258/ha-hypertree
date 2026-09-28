@@ -7,6 +7,16 @@ build:
 preview:
     npm run preview
 
+test:
+    npm run test
+
+build-panel:
+    npm run build:panel
+
+# Start the mock HA WebSocket server
+mock:
+    npm run mock
+
 # Generate a local HTTPS certificate using mkcert
 cert:
     mkdir -p .certs

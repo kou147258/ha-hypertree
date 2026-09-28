@@ -53,6 +53,14 @@ npm run build
 npm run preview
 ```
 
+### Other commands
+
+```sh
+npm run test          # run the vitest suite
+npm run build:panel   # build the HACS panel to dist-panel/hypertree.js
+npm run mock          # start the mock HA server (see mock/README.md)
+```
+
 The built files in `dist/` can be served by any static file server.
 
 ### Local HTTPS

@@ -1,6 +1,24 @@
 # Changelog
 
-## 0.13.0 - 2026-06-11
+## [0.13.1] - 2026-09-28
+
+### Changed
+
+- Share session setup between the standalone app and the HA panel
+- Seed the panel's initial states from the HA frontend so the first render has data
+- Stop loading automation configs after a fully failed batch instead of sending the rest
+- Remove unused d3 dependencies and dead CSS
+
+### Fixed
+
+- Escape entity names, IDs, and states in tooltips, stored credentials in the login form, and error messages in the panel
+- Remove the status bar when the panel is detached
+- Keep the debug console and tooltip attached to the current panel after HA recreates it
+- Ignore the backtick shortcut while typing in inputs inside the panel
+- Use the default color for nodes with an empty domain
+- Log automation fetch errors as readable text
+
+## [0.13.0] - 2026-06-11
 
 ### Changed
 
@@ -22,7 +40,7 @@
 - Ignore repeated connect attempts while one is already in flight
 - Abort panel initialization if the panel is detached during the registry fetch, preventing a duplicate subscription on quick navigation
 
-## 0.12.0 - 2026-05-02
+## [0.12.0] - 2026-05-02
 
 ### Added
 
@@ -52,7 +70,7 @@
 - Load automation edges on page load when "Automation entities only" was saved; the previous code read from the filtered graph, which was empty until edges loaded
 - Normalize the Gaussian halo curve so alpha reaches zero at the sprite boundary; previously a soft halo left a faint hard ring where overlapping halos cut into each other
 
-## 0.10.0 - 2026-03-08
+## [0.10.0] - 2026-03-08
 
 ### Added
 
@@ -66,7 +84,7 @@
 - Move filters into a separate panel from the settings dropdown
 - Sort domain and area filter lists alphabetically
 
-## 0.9.0 - 2026-03-07
+## [0.9.0] - 2026-03-07
 
 ### Changed
 
@@ -83,7 +101,7 @@
 - Remove hyperbolic wedge layout
 - Remove `z` and `screenZ` fields from tree nodes
 
-## 0.8.1 - 2026-03-04
+## [0.8.1] - 2026-03-04
 
 ### Added
 
@@ -96,7 +114,7 @@
 - Rename constellation glow settings for clarity: Brightness, Halo intensity, Halo size, Parent halo, Edge glow
 - Rename "Changed only" to "Skip unchanged"
 
-## 0.8.0 - 2026-03-03
+## [0.8.0] - 2026-03-03
 
 ### Added
 
@@ -119,7 +137,7 @@
 - Fix "too much recursion" crash when switching unavailable mode to hidden by adding depth limit to Barnes-Hut quadtree
 - Fix rapid star flickering during drag by using stable per-node phase hash instead of position-based twinkle phase
 
-## 0.7.0 - 2026-03-03
+## [0.7.0] - 2026-03-03
 
 ### Added
 
@@ -141,13 +159,13 @@
 - Split `rebuildWithStructure` into `rebuildGraph` (filter-only) and `rebuildWithStructure` (reloads automation data)
 - Pass optional extra HTML to tooltip for force-specific content
 
-## 0.6.1 - 2026-03-02
+## [0.6.1] - 2026-03-02
 
 ### Added
 
 - Add "only" unavailable display mode to show only unavailable entities
 
-## 0.6.0 - 2026-03-02
+## [0.6.0] - 2026-03-02
 
 ### Added
 
@@ -172,7 +190,7 @@
 
 - Remove hardcoded label zoom constants in favor of configurable sliders
 
-## 0.5.1 - 2026-03-02
+## [0.5.1] - 2026-03-02
 
 ### Added
 
@@ -186,7 +204,7 @@
 - Use async static path registration for HA compatibility
 - Declare http and frontend dependencies in manifest
 
-## 0.4.1 - 2026-03-02
+## [0.4.1] - 2026-03-02
 
 ### Added
 
@@ -202,7 +220,7 @@
 
 - Fix crash when transparent() receives shorthand hex colors like #666
 
-## 0.4.0 - 2026-03-02
+## [0.4.0] - 2026-03-02
 
 ### Added
 
@@ -216,7 +234,7 @@
 - Default entities toggle to on
 - Add spacing between settings panel groups
 
-## 0.3.0 - 2026-03-01
+## [0.3.0] - 2026-03-01
 
 ### Added
 
@@ -230,7 +248,7 @@
 - Tune default constellation parameters: glow brightness 2, star size 0.8, glow intensity 1.2, twinkle speed 0.1
 - Increase default label size to 16 and entity dot size to 16
 
-## 0.2.0 - 2026-03-01
+## [0.2.0] - 2026-03-01
 
 ### Added
 
@@ -260,10 +278,27 @@
 - Fix twinkle glitch when glow brightness exceeds 1 by clamping alpha values
 - Fix uneven star brightness at zero twinkle speed
 
-## 0.1.0 - 2025-12-15
+## [0.1.0] - 2025-12-15
 
 ### Added
 
 - Add seven visualization modes: Force, Dendrogram, Globe, Hyperbolic, Matrix, Sunburst, Treemap
 - Add real-time entity state updates over WebSocket
 - Add debug console toggled with backtick key
+
+[0.13.1]: https://github.com/knowald/ha-hypertree/releases/tag/v0.13.1
+[0.13.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.13.0
+[0.12.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.12.0
+[0.10.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.10.0
+[0.9.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.9.0
+[0.8.1]: https://github.com/knowald/ha-hypertree/releases/tag/v0.8.1
+[0.8.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.8.0
+[0.7.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.7.0
+[0.6.1]: https://github.com/knowald/ha-hypertree/releases/tag/v0.6.1
+[0.6.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.6.0
+[0.5.1]: https://github.com/knowald/ha-hypertree/releases/tag/v0.5.1
+[0.4.1]: https://github.com/knowald/ha-hypertree/releases/tag/v0.4.1
+[0.4.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.4.0
+[0.3.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.3.0
+[0.2.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.2.0
+[0.1.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.1.0
