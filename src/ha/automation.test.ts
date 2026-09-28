@@ -139,4 +139,22 @@ describe("fetchAutomationEdges", () => {
     expect(edges).toHaveLength(23);
     expect(new Set(edges.map((e) => e.automationEntityId)).size).toBe(23);
   });
+
+  it("stops after a fully failed batch and reports the unloaded count", async () => {
+    const ids = Array.from({ length: 25 }, (_, i) => `automation.a${i}`);
+    const requested: string[] = [];
+    const connection = {
+      sendMessagePromise: async (msg: { entity_id: string }) => {
+        requested.push(msg.entity_id);
+        throw new Error("disconnected");
+      },
+    } as unknown as Connection;
+    const onAbort = vi.fn();
+
+    const edges = await fetchAutomationEdges(connection, ids, KNOWN, onAbort);
+
+    expect(edges).toEqual([]);
+    expect(requested).toHaveLength(10);
+    expect(onAbort).toHaveBeenCalledWith(25);
+  });
 });
