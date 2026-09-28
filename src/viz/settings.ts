@@ -56,7 +56,7 @@ export const defaults: ForceSettings = {
   showAutomationEdges: false,
   unavailableMode: "ring",
   changedOnly: true,
-  constellation: true,
+  constellation: false,
   groupBy: "area",
   structureMode: "domain",
   starSize: 1.4,
