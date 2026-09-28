@@ -19,6 +19,7 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: npm run test
       - run: npm run build:panel
 
       - uses: webfactory/ssh-agent@v0.9.0
@@ -49,7 +50,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           # Extract the section for this version (between its ## heading and the next ## heading)
           awk -v ver="$VERSION" '
-            /^## / { if (found) exit; if (index($0, ver)) { found=1; next } }
+            /^## / { if (found) exit; if ($0 ~ "^## \\[?" ver "\\]? ") { found=1; next } }
             found { print }
           ' CHANGELOG.md > release_notes.md
 
