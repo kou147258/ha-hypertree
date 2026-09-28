@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.14.0] - 2026-09-29
+
+### Added
+
+- Pan and drag with touch, and pinch to zoom
+- Keep panning with decaying speed after releasing a drag in motion
+- Show a menu button in the panel on narrow screens to open the HA sidebar
+
+### Changed
+
+- Default to the dots node style instead of stars
+- Scale scroll zoom by scroll distance so trackpads no longer zoom too fast
+
+### Fixed
+
+- Fill the full screen height in the HA panel
+
 ## [0.13.1] - 2026-09-28
 
 ### Changed
@@ -286,6 +303,7 @@
 - Add real-time entity state updates over WebSocket
 - Add debug console toggled with backtick key
 
+[0.14.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.14.0
 [0.13.1]: https://github.com/knowald/ha-hypertree/releases/tag/v0.13.1
 [0.13.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.13.0
 [0.12.0]: https://github.com/knowald/ha-hypertree/releases/tag/v0.12.0
