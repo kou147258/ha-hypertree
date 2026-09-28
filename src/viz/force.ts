@@ -1,8 +1,8 @@
 import type { Connection } from "home-assistant-js-websocket";
 import type { TreeNode } from "../tree/types";
 import type { HaState, Registries } from "../ha/types";
-import { color, showTip, hideTip } from "./shared";
-import { randomizeColors, resetColors, getDomainColors, setDomainColors, setDomainColor, domainList } from "../render/colors";
+import { showTooltip, hideTooltip } from "../render/tooltip";
+import { nodeColor, randomizeColors, resetColors, getDomainColors, setDomainColors, setDomainColor, domainList } from "../render/colors";
 import { getEntityIconName, getCachedIcon, requestIcon, setIconResolveCallback } from "../render/icons";
 import { createTransform, applyWheel, screenToWorld, type ZoomTransform } from "./zoom";
 import { buildTree, buildTreeByDevice, flattenTree } from "../tree/build";
@@ -70,8 +70,9 @@ let contextMenu: HTMLElement | null = null;
 let contextMenuDismiss: ((ev: MouseEvent) => void) | null = null;
 let contextMenuDismissTimer: number | null = null;
 let onMouseLeave: (() => void) | null = null;
+let resizeObserver: ResizeObserver | null = null;
 
-let alphaDecay = 0.998;
+const ALPHA_DECAY = 0.998;
 let alpha = 1;
 
 let revealedNodes: Set<string> = new Set();
@@ -93,7 +94,6 @@ const GLOW_DURATION = 3000;
 
 // Star sprite cache: pre-rendered gradient stars keyed by "color|sizeCategory|glowParam"
 const spriteCache = new Map<string, StarSprite>();
-let spriteCacheVersion = 0;
 let lastSpriteParams = "";
 
 function getSpriteParams(): string {
@@ -105,7 +105,6 @@ function invalidateSpriteCache(): void {
   if (params !== lastSpriteParams) {
     spriteCache.clear();
     lastSpriteParams = params;
-    spriteCacheVersion++;
   }
 }
 
@@ -223,7 +222,7 @@ interface StarSprite {
 }
 
 function getStarSprite(nodeCol: string, intensity: number): StarSprite {
-  const key = `${nodeCol}|${intensity}|${settings.haloFalloff}|${spriteCacheVersion}`;
+  const key = `${nodeCol}|${intensity}|${settings.haloFalloff}`;
   const cached = spriteCache.get(key);
   if (cached) return cached;
 
@@ -311,9 +310,7 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
   haConnection = connection ?? null;
   reconnectCallback = onReconnect ?? null;
   return {
-    name: "Force",
-
-    create(container: HTMLElement, _root: TreeNode, states: Map<string, HaState>) {
+    create(container: HTMLElement, states: Map<string, HaState>) {
       currentStates = states;
       currentRegistries = registries;
       alpha = 1;
@@ -332,20 +329,16 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
 
       settingsPanel = createSettings(container);
 
-      const obs = new ResizeObserver(() => resize());
-      obs.observe(container);
-      (canvas as any).__obs = obs;
+      resizeObserver = new ResizeObserver(() => resize());
+      resizeObserver.observe(container);
 
-      const root = settings.structureMode === "device"
-        ? buildTreeByDevice(registries)
-        : buildTree(registries);
-      buildGraph(root);
+      buildGraph(buildCurrentTree());
       resize();
       if (settings.showAutomationEdges || settings.automationOnly) loadAutomationEdges();
 
       setIconResolveCallback(() => ensureLoop());
 
-      onMouseLeave = () => { dragNode = null; panning = false; hoveredNode = null; hideTip(); };
+      onMouseLeave = () => { dragNode = null; panning = false; hoveredNode = null; hideTooltip(); };
       canvas.addEventListener("mousedown", onMouseDown);
       canvas.addEventListener("mousemove", onMouseMove);
       canvas.addEventListener("mouseup", onMouseUp);
@@ -359,8 +352,9 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
     destroy() {
       cancelAnimationFrame(frame);
       frame = 0;
+      resizeObserver?.disconnect();
+      resizeObserver = null;
       if (canvas) {
-        (canvas as any).__obs?.disconnect();
         canvas.removeEventListener("mousedown", onMouseDown);
         canvas.removeEventListener("mousemove", onMouseMove);
         canvas.removeEventListener("mouseup", onMouseUp);
@@ -385,19 +379,15 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
       pulseWaveFields.clear();
       centroidCache = null;
       labelMetricsCache.clear();
-      glowSpriteCache.clear();
-      automationEdges = [];
-      automationEdgesByEntity = new Map();
-      automationLoaded = false;
+      clearColorCaches();
+      resetAutomationState();
       automationLoading = false;
       onAutomationLoaded = null;
-      revealedNodes.clear();
+      resetReveals();
       collapsedNodes.clear();
       stateChangeCounts.clear();
       allTreeNodesById = new Map();
       allEntityTreeNodes = new Map();
-      pendingReveals = [];
-      if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
       dismissContextMenu();
       setIconResolveCallback(null);
       dragNode = null;
@@ -430,28 +420,49 @@ export function createForceViz(registries: Registries, haUrl?: string, connectio
   };
 }
 
+function buildCurrentTree(): TreeNode {
+  return settings.structureMode === "device"
+    ? buildTreeByDevice(currentRegistries!)
+    : buildTree(currentRegistries!);
+}
+
 function rebuildGraph(): void {
   if (!currentRegistries || !canvas) return;
-
-  const root = settings.structureMode === "device"
-    ? buildTreeByDevice(currentRegistries)
-    : buildTree(currentRegistries);
-
   alpha = 1;
-  buildGraph(root);
+  buildGraph(buildCurrentTree());
   ensureLoop();
 }
 
 function rebuildWithStructure(): void {
   rebuildGraph();
-
-  automationLoaded = false;
-  automationEdges = [];
-  automationEdgesByEntity = new Map();
+  resetAutomationState();
   if (settings.showAutomationEdges || settings.automationOnly) loadAutomationEdges();
 }
 
+function resetAutomationState(): void {
+  automationEdges = [];
+  automationEdgesByEntity = new Map();
+  automationLoaded = false;
+}
+
+function clearColorCaches(): void {
+  spriteCache.clear();
+  glowSpriteCache.clear();
+}
+
+function pushToMap<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
 const REVEAL_STAGGER_MS = 120;
+
+function resetReveals(): void {
+  revealedNodes.clear();
+  pendingReveals = [];
+  if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
+}
 
 function revealAncestorChain(entityId: string): void {
   const treeNode = allEntityTreeNodes.get(entityId);
@@ -467,7 +478,7 @@ function revealAncestorChain(entityId: string): void {
 
   if (chain.length === 0) return;
 
-  // Reverse so ancestors come first: area → domain/device → entity
+  // Reverse so ancestors come first: area -> domain/device -> entity
   chain.reverse();
 
   // Queue nodes that aren't already pending
@@ -514,20 +525,7 @@ function insertRevealedNode(nodeId: string, skipGlow = false): void {
     if (existing.tree === treeNode) return;
   }
 
-  const r = treeNode.kind === "area" ? 8
-    : (treeNode.kind === "domain" || treeNode.kind === "device") ? 6
-      : settings.entityDotSize;
-
-  let hash = 0;
-  for (let i = 0; i < treeNode.id.length; i++) hash = ((hash << 5) - hash + treeNode.id.charCodeAt(i)) | 0;
-  const fn: FNode = {
-    tree: treeNode,
-    x: 0, y: 0,
-    vx: 0, vy: 0,
-    fx: null, fy: null,
-    r,
-    phase: (hash & 0xffff) / 0xffff * Math.PI * 2,
-  };
+  const fn = createFNode(treeNode, 0, 0);
 
   // Position near parent if it exists in the graph
   if (treeNode.parent) {
@@ -659,8 +657,66 @@ function removeSettings(): void {
   }
 }
 
+interface SettingsControls {
+  entitiesToggle: HTMLLabelElement;
+  unavailableSelect: HTMLLabelElement;
+  changedOnlyToggle: HTMLLabelElement;
+  appearOnChangeToggle: HTMLLabelElement;
+  autoOnlyToggle: HTMLLabelElement;
+}
+
+interface SettingsContext {
+  container: HTMLElement;
+  searchInput: HTMLInputElement;
+  // Filled in by the section builders; read only from event handlers after createSettings returns.
+  controls: SettingsControls;
+  syncColorSwatches: () => void;
+}
+
+function setDisabled(el: HTMLElement, disabled: boolean): void {
+  el.style.opacity = disabled ? "0.4" : "";
+  const input = el.querySelector("input");
+  const select = el.querySelector("select");
+  if (input) input.disabled = disabled;
+  if (select) select.disabled = disabled;
+}
+
+function syncSettingsState(controls: SettingsControls): void {
+  const entitiesOff = !settings.showEntities;
+  const aocOn = settings.appearOnChange;
+  setDisabled(controls.entitiesToggle, aocOn);
+  setDisabled(controls.unavailableSelect, entitiesOff || aocOn);
+  setDisabled(controls.changedOnlyToggle, entitiesOff);
+  setDisabled(controls.appearOnChangeToggle, entitiesOff);
+  setDisabled(controls.autoOnlyToggle, entitiesOff || !automationLoaded || !settings.showAutomationEdges);
+}
+
 function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
-  // -- Canvas toolbar (always visible, top-right) --
+  const { toolbar, searchInput, settingsDropdown, filterDropdown } = buildToolbar(container);
+  const [viewTab, styleTab, advancedTab] = buildTabs(settingsDropdown, ["View", "Style", "Advanced"]);
+
+  const context: SettingsContext = {
+    container,
+    searchInput,
+    controls: {} as SettingsControls,
+    syncColorSwatches: () => {},
+  };
+
+  buildViewTab(viewTab, context);
+  buildFilterPanel(filterDropdown);
+  buildStyleTab(styleTab, context);
+  syncSettingsState(context.controls);
+  buildAdvancedTab(advancedTab, context);
+
+  return { toolbar };
+}
+
+function buildToolbar(container: HTMLElement): {
+  toolbar: HTMLDivElement;
+  searchInput: HTMLInputElement;
+  settingsDropdown: HTMLDivElement;
+  filterDropdown: HTMLDivElement;
+} {
   const toolbar = document.createElement("div");
   toolbar.className = "canvas-toolbar";
   container.appendChild(toolbar);
@@ -701,47 +757,40 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   gearBtn.title = "Settings";
   toolbar.appendChild(gearBtn);
 
-  // -- Dropdown panels --
-  const panel = document.createElement("div");
-  panel.className = "settings-panel";
-  toolbar.appendChild(panel);
+  const settingsDropdown = document.createElement("div");
+  settingsDropdown.className = "settings-panel";
+  toolbar.appendChild(settingsDropdown);
 
-  const filterPanel = document.createElement("div");
-  filterPanel.className = "settings-panel filter-panel-dropdown";
-  toolbar.appendChild(filterPanel);
-
-  function closeFilterPanel(): void {
-    filterPanel.classList.remove("open");
-    filterBtn.classList.remove("active");
-  }
-
-  function closeSettingsPanel(): void {
-    panel.classList.remove("open");
-    gearBtn.classList.remove("active");
-  }
+  const filterDropdown = document.createElement("div");
+  filterDropdown.className = "settings-panel filter-panel-dropdown";
+  toolbar.appendChild(filterDropdown);
 
   gearBtn.addEventListener("click", () => {
-    const opening = !panel.classList.contains("open");
-    closeFilterPanel();
-    panel.classList.toggle("open", opening);
+    const opening = !settingsDropdown.classList.contains("open");
+    filterDropdown.classList.remove("open");
+    filterBtn.classList.remove("active");
+    settingsDropdown.classList.toggle("open", opening);
     gearBtn.classList.toggle("active", opening);
   });
 
   filterBtn.addEventListener("click", () => {
-    const opening = !filterPanel.classList.contains("open");
-    closeSettingsPanel();
-    filterPanel.classList.toggle("open", opening);
+    const opening = !filterDropdown.classList.contains("open");
+    settingsDropdown.classList.remove("open");
+    gearBtn.classList.remove("active");
+    filterDropdown.classList.toggle("open", opening);
     filterBtn.classList.toggle("active", opening);
   });
 
-  // -- Tab bar --
+  return { toolbar, searchInput, settingsDropdown, filterDropdown };
+}
+
+function buildTabs(parent: HTMLDivElement, names: string[]): HTMLDivElement[] {
   const tabBar = document.createElement("div");
   tabBar.className = "settings-tabs";
-  const tabNames = ["View", "Style", "Advanced"];
   const tabBtns: HTMLButtonElement[] = [];
   const tabPanels: HTMLDivElement[] = [];
 
-  for (const name of tabNames) {
+  for (const name of names) {
     const btn = document.createElement("button");
     btn.className = "settings-tab";
     btn.textContent = name;
@@ -749,13 +798,13 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
     tabBar.appendChild(btn);
     tabBtns.push(btn);
   }
-  panel.appendChild(tabBar);
+  parent.appendChild(tabBar);
 
   const body = document.createElement("div");
   body.className = "settings-body";
-  panel.appendChild(body);
+  parent.appendChild(body);
 
-  for (const _name of tabNames) {
+  for (let i = 0; i < names.length; i++) {
     const tabContent = document.createElement("div");
     tabContent.className = "settings-tab-content";
     body.appendChild(tabContent);
@@ -774,58 +823,34 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   }
   activateTab(0);
 
-  const viewTab = tabPanels[0];
-  const styleTab = tabPanels[1];
-  const advancedTab = tabPanels[2];
+  return tabPanels;
+}
 
-  // -- Shared disabled state logic --
-  let entitiesToggle!: HTMLLabelElement;
-  let unavailableSelect!: HTMLLabelElement;
-  let changedOnlyToggle!: HTMLLabelElement;
-  let appearOnChangeToggle!: HTMLLabelElement;
-  let autoOnlyToggle!: HTMLLabelElement;
+function makeSubOptions(hidden: boolean): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = "force-sub-options";
+  el.hidden = hidden;
+  return el;
+}
 
-  function setDisabled(el: HTMLElement, disabled: boolean): void {
-    el.style.opacity = disabled ? "0.4" : "";
-    const input = el.querySelector("input");
-    const select = el.querySelector("select");
-    if (input) input.disabled = disabled;
-    if (select) select.disabled = disabled;
-  }
+function buildViewTab(tab: HTMLDivElement, context: SettingsContext): void {
+  const controls = context.controls;
 
-  function syncSettingsState(): void {
-    const entitiesOff = !settings.showEntities;
-    const aocOn = settings.appearOnChange;
-    setDisabled(entitiesToggle, aocOn);
-    setDisabled(unavailableSelect, entitiesOff || aocOn);
-    setDisabled(changedOnlyToggle, entitiesOff);
-    setDisabled(appearOnChangeToggle, entitiesOff);
-    setDisabled(autoOnlyToggle, entitiesOff || !automationLoaded || !settings.showAutomationEdges);
-  }
-
-  // =====================
-  // VIEW TAB
-  // =====================
-
-  viewTab.appendChild(makeSegmented("Structure", ["domain", "device"], settings.structureMode, (v) => {
+  tab.appendChild(makeSegmented("Structure", ["domain", "device"], settings.structureMode, (v) => {
     settings.structureMode = v as StructureMode;
     rebuildWithStructure();
     saveSettings();
   }));
 
-  viewTab.appendChild(makeSegmented("Layout", ["tree", "scatter"], settings.initialLayout, (v) => {
+  tab.appendChild(makeSegmented("Layout", ["tree", "scatter"], settings.initialLayout, (v) => {
     settings.initialLayout = v as InitialLayout;
     rebuildGraph();
     saveSettings();
   }, "Initial node positions: tree (structured) or scatter (random)"));
 
-  // -- Node style (dots / stars) with star sub-options --
   const styleGroup = document.createElement("div");
   styleGroup.className = "visual-mode-group";
-
-  const constellationSubOptions = document.createElement("div");
-  constellationSubOptions.className = "force-sub-options";
-  constellationSubOptions.hidden = !settings.constellation;
+  const constellationSubOptions = makeSubOptions(!settings.constellation);
 
   styleGroup.appendChild(makeSegmented("Style", ["dots", "stars"], settings.constellation ? "stars" : "dots", (v) => {
     settings.constellation = v === "stars";
@@ -833,21 +858,16 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
     saveSettings();
   }, "Render nodes as plain dots or glowing stars"));
   styleGroup.appendChild(constellationSubOptions);
-  viewTab.appendChild(styleGroup);
+  tab.appendChild(styleGroup);
 
-  // -- Overlay mode radio (default / hulls / automations) --
   const visualModeGroup = document.createElement("div");
   visualModeGroup.className = "visual-mode-group";
 
   const currentVisualMode = settings.showAutomationEdges ? "automations" : settings.showHulls ? "hulls" : "default";
   const visualModes = ["default", "hulls", "automations"] as const;
 
-  const hullSubOptions = document.createElement("div");
-  hullSubOptions.className = "force-sub-options";
-  hullSubOptions.hidden = currentVisualMode !== "hulls";
-  const automationSubOptions = document.createElement("div");
-  automationSubOptions.className = "force-sub-options";
-  automationSubOptions.hidden = currentVisualMode !== "automations";
+  const hullSubOptions = makeSubOptions(currentVisualMode !== "hulls");
+  const automationSubOptions = makeSubOptions(currentVisualMode !== "automations");
 
   function applyVisualMode(mode: string): void {
     settings.showHulls = mode === "hulls";
@@ -857,10 +877,10 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
     if (mode === "automations" && !automationLoaded && !automationLoading) loadAutomationEdges();
     if (mode !== "automations" && settings.automationOnly) {
       settings.automationOnly = false;
-      autoOnlyToggle.querySelector("input")!.checked = false;
+      controls.autoOnlyToggle.querySelector("input")!.checked = false;
       rebuildGraph();
     }
-    syncSettingsState();
+    syncSettingsState(controls);
     ensureLoop();
     saveSettings();
   }
@@ -902,7 +922,7 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
     saveSettings();
   }));
 
-  autoOnlyToggle = makeToggle("Automation entities only", settings.automationOnly, (v) => {
+  controls.autoOnlyToggle = makeToggle("Automation entities only", settings.automationOnly, (v) => {
     settings.automationOnly = v;
     saveSettings();
     if (v && !automationLoaded && !automationLoading) {
@@ -911,209 +931,91 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
       rebuildGraph();
     }
   }, "Hide entities not referenced by any automation");
-  automationSubOptions.appendChild(autoOnlyToggle);
+  automationSubOptions.appendChild(controls.autoOnlyToggle);
 
   onAutomationLoaded = () => {
-    syncSettingsState();
+    syncSettingsState(controls);
     if (settings.automationOnly) rebuildGraph();
   };
 
-  viewTab.appendChild(visualModeGroup);
+  tab.appendChild(visualModeGroup);
 
-  // -- Entities + sub-options --
-  entitiesToggle = makeToggle("Entities", settings.showEntities, (v) => {
+  const entitiesSubOptions = makeSubOptions(!settings.showEntities);
+
+  controls.entitiesToggle = makeToggle("Entities", settings.showEntities, (v) => {
     settings.showEntities = v;
     entitiesSubOptions.hidden = !v;
     if (!v) {
       if (settings.appearOnChange) {
         settings.appearOnChange = false;
-        appearOnChangeToggle.querySelector("input")!.checked = false;
-        revealedNodes.clear();
-        pendingReveals = [];
-        if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
+        controls.appearOnChangeToggle.querySelector("input")!.checked = false;
+        resetReveals();
       }
       if (settings.automationOnly) {
         settings.automationOnly = false;
-        autoOnlyToggle.querySelector("input")!.checked = false;
+        controls.autoOnlyToggle.querySelector("input")!.checked = false;
       }
     }
-    syncSettingsState();
+    syncSettingsState(controls);
     rebuildGraph();
     saveSettings();
   });
-  viewTab.appendChild(entitiesToggle);
+  tab.appendChild(controls.entitiesToggle);
 
-  const entitiesSubOptions = document.createElement("div");
-  entitiesSubOptions.className = "force-sub-options";
-  entitiesSubOptions.hidden = !settings.showEntities;
-
-  unavailableSelect = makeSelect("Unavailable", ["normal", "pulse", "ring", "hidden", "only"], settings.unavailableMode, (v) => {
+  controls.unavailableSelect = makeSelect("Unavailable", ["normal", "pulse", "ring", "hidden", "only"], settings.unavailableMode, (v) => {
     const prev = settings.unavailableMode;
     settings.unavailableMode = v as UnavailableMode;
     if (v === "hidden" || prev === "hidden" || v === "only" || prev === "only") rebuildGraph();
     ensureLoop();
     saveSettings();
   });
-  entitiesSubOptions.appendChild(unavailableSelect);
+  entitiesSubOptions.appendChild(controls.unavailableSelect);
 
-  appearOnChangeToggle = makeToggle("Appear on change", settings.appearOnChange, (v) => {
+  controls.appearOnChangeToggle = makeToggle("Appear on change", settings.appearOnChange, (v) => {
     settings.appearOnChange = v;
     if (v) {
       settings.showEntities = true;
-      entitiesToggle.querySelector("input")!.checked = true;
+      controls.entitiesToggle.querySelector("input")!.checked = true;
     } else {
-      revealedNodes.clear();
-      pendingReveals = [];
-      if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
+      resetReveals();
     }
-    syncSettingsState();
+    syncSettingsState(controls);
     rebuildGraph();
     saveSettings();
   }, "Nodes start hidden and appear as state changes arrive");
-  entitiesSubOptions.appendChild(appearOnChangeToggle);
-  viewTab.appendChild(entitiesSubOptions);
+  entitiesSubOptions.appendChild(controls.appearOnChangeToggle);
+  tab.appendChild(entitiesSubOptions);
+}
 
-  // -- Filter panel contents --
+function buildFilterPanel(dropdown: HTMLDivElement): void {
   const filterBody = document.createElement("div");
   filterBody.className = "settings-body";
-  filterPanel.appendChild(filterBody);
+  dropdown.appendChild(filterBody);
 
-  // Search as filter toggle
   filterBody.appendChild(makeToggle("Search hides non-matching", settings.searchAsFilter, (v) => {
     settings.searchAsFilter = v;
     saveSettings();
     if (searchQuery) rebuildGraph();
   }, "When enabled, the search bar hides nodes instead of highlighting them"));
 
-  // Domain filter
-  const domainSection = makeSection("Domains");
-
-  const domainActions = document.createElement("div");
-  domainActions.className = "filter-actions";
-  const domainAllBtn = document.createElement("button");
-  domainAllBtn.className = "force-reset-btn";
-  domainAllBtn.textContent = "All";
-  domainAllBtn.style.cssText = "flex:1;padding:0.2rem 0";
-  const domainNoneBtn = document.createElement("button");
-  domainNoneBtn.className = "force-reset-btn";
-  domainNoneBtn.textContent = "None";
-  domainNoneBtn.style.cssText = "flex:1;padding:0.2rem 0";
-  domainActions.appendChild(domainAllBtn);
-  domainActions.appendChild(domainNoneBtn);
-  domainSection.body.appendChild(domainActions);
-
-  const domainGrid = document.createElement("div");
-  domainGrid.className = "filter-grid";
-  domainSection.body.appendChild(domainGrid);
-
   const domains = domainList().sort();
-  const domainCheckboxes: { domain: string; checkbox: HTMLInputElement }[] = [];
+  filterBody.appendChild(makeFilterSection(
+    "Domains",
+    domains.map((d) => ({ id: d, label: d })),
+    () => settings.hiddenDomains,
+    (ids) => { settings.hiddenDomains = ids; },
+  ));
 
-  for (const d of domains) {
-    const item = document.createElement("label");
-    item.className = "filter-item";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !settings.hiddenDomains.includes(d);
-    cb.addEventListener("change", () => {
-      if (cb.checked) {
-        settings.hiddenDomains = settings.hiddenDomains.filter((x) => x !== d);
-      } else {
-        settings.hiddenDomains = [...settings.hiddenDomains, d];
-      }
-      saveSettings();
-      rebuildGraph();
-    });
-    const label = document.createElement("span");
-    label.className = "filter-domain";
-    label.textContent = d;
-    item.appendChild(cb);
-    item.appendChild(label);
-    domainGrid.appendChild(item);
-    domainCheckboxes.push({ domain: d, checkbox: cb });
-  }
+  const areas = buildCurrentTree().children
+    .filter((c) => c.kind === "area")
+    .sort((a, b) => a.label.localeCompare(b.label));
+  filterBody.appendChild(makeFilterSection(
+    "Areas",
+    areas.map((a) => ({ id: a.id.replace(/^area:/, ""), label: a.label })),
+    () => settings.hiddenAreas,
+    (ids) => { settings.hiddenAreas = ids; },
+  ));
 
-  domainAllBtn.addEventListener("click", () => {
-    settings.hiddenDomains = [];
-    for (const { checkbox } of domainCheckboxes) checkbox.checked = true;
-    saveSettings();
-    rebuildGraph();
-  });
-  domainNoneBtn.addEventListener("click", () => {
-    settings.hiddenDomains = domains.slice();
-    for (const { checkbox } of domainCheckboxes) checkbox.checked = false;
-    saveSettings();
-    rebuildGraph();
-  });
-  filterBody.appendChild(domainSection.el);
-
-  // Area filter
-  const areaSection = makeSection("Areas");
-
-  const areaActions = document.createElement("div");
-  areaActions.className = "filter-actions";
-  const areaAllBtn = document.createElement("button");
-  areaAllBtn.className = "force-reset-btn";
-  areaAllBtn.textContent = "All";
-  areaAllBtn.style.cssText = "flex:1;padding:0.2rem 0";
-  const areaNoneBtn = document.createElement("button");
-  areaNoneBtn.className = "force-reset-btn";
-  areaNoneBtn.textContent = "None";
-  areaNoneBtn.style.cssText = "flex:1;padding:0.2rem 0";
-  areaActions.appendChild(areaAllBtn);
-  areaActions.appendChild(areaNoneBtn);
-  areaSection.body.appendChild(areaActions);
-
-  const areaGrid = document.createElement("div");
-  areaGrid.className = "filter-grid";
-  areaSection.body.appendChild(areaGrid);
-
-  const filterRoot = settings.structureMode === "device"
-    ? buildTreeByDevice(currentRegistries!)
-    : buildTree(currentRegistries!);
-  const areas = filterRoot.children.filter((c) => c.kind === "area").sort((a, b) => a.label.localeCompare(b.label));
-  const areaCheckboxes: { areaId: string; checkbox: HTMLInputElement }[] = [];
-
-  for (const area of areas) {
-    const areaId = area.id.replace(/^area:/, "");
-    const item = document.createElement("label");
-    item.className = "filter-item";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !settings.hiddenAreas.includes(areaId);
-    cb.addEventListener("change", () => {
-      if (cb.checked) {
-        settings.hiddenAreas = settings.hiddenAreas.filter((x) => x !== areaId);
-      } else {
-        settings.hiddenAreas = [...settings.hiddenAreas, areaId];
-      }
-      saveSettings();
-      rebuildGraph();
-    });
-    const label = document.createElement("span");
-    label.className = "filter-domain";
-    label.textContent = area.label;
-    item.appendChild(cb);
-    item.appendChild(label);
-    areaGrid.appendChild(item);
-    areaCheckboxes.push({ areaId, checkbox: cb });
-  }
-
-  areaAllBtn.addEventListener("click", () => {
-    settings.hiddenAreas = [];
-    for (const { checkbox } of areaCheckboxes) checkbox.checked = true;
-    saveSettings();
-    rebuildGraph();
-  });
-  areaNoneBtn.addEventListener("click", () => {
-    settings.hiddenAreas = areas.map((a) => a.id.replace(/^area:/, ""));
-    for (const { checkbox } of areaCheckboxes) checkbox.checked = false;
-    saveSettings();
-    rebuildGraph();
-  });
-  filterBody.appendChild(areaSection.el);
-
-  // State filter
   const stateSection = makeSection("State");
 
   const stateInputWrap = document.createElement("div");
@@ -1147,44 +1049,106 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   stateInputWrap.appendChild(stateClearBtn);
   stateSection.body.appendChild(stateInputWrap);
   filterBody.appendChild(stateSection.el);
+}
 
-  // =====================
-  // STYLE TAB
-  // =====================
+function makeFilterSection(
+  title: string,
+  items: { id: string; label: string }[],
+  getHidden: () => string[],
+  setHidden: (ids: string[]) => void,
+): HTMLDivElement {
+  const section = makeSection(title);
 
-  styleTab.appendChild(makeToggle("Labels", settings.showLabels, (v) => { settings.showLabels = v; saveSettings(); }));
-  styleTab.appendChild(makeToggle(
+  const actions = document.createElement("div");
+  actions.className = "filter-actions";
+  const allBtn = document.createElement("button");
+  allBtn.className = "force-reset-btn";
+  allBtn.textContent = "All";
+  allBtn.style.cssText = "flex:1;padding:0.2rem 0";
+  const noneBtn = document.createElement("button");
+  noneBtn.className = "force-reset-btn";
+  noneBtn.textContent = "None";
+  noneBtn.style.cssText = "flex:1;padding:0.2rem 0";
+  actions.appendChild(allBtn);
+  actions.appendChild(noneBtn);
+  section.body.appendChild(actions);
+
+  const grid = document.createElement("div");
+  grid.className = "filter-grid";
+  section.body.appendChild(grid);
+
+  const checkboxes: HTMLInputElement[] = [];
+  for (const { id, label } of items) {
+    const item = document.createElement("label");
+    item.className = "filter-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !getHidden().includes(id);
+    cb.addEventListener("change", () => {
+      if (cb.checked) {
+        setHidden(getHidden().filter((x) => x !== id));
+      } else {
+        setHidden([...getHidden(), id]);
+      }
+      saveSettings();
+      rebuildGraph();
+    });
+    const text = document.createElement("span");
+    text.className = "filter-domain";
+    text.textContent = label;
+    item.appendChild(cb);
+    item.appendChild(text);
+    grid.appendChild(item);
+    checkboxes.push(cb);
+  }
+
+  allBtn.addEventListener("click", () => {
+    setHidden([]);
+    for (const cb of checkboxes) cb.checked = true;
+    saveSettings();
+    rebuildGraph();
+  });
+  noneBtn.addEventListener("click", () => {
+    setHidden(items.map((i) => i.id));
+    for (const cb of checkboxes) cb.checked = false;
+    saveSettings();
+    rebuildGraph();
+  });
+
+  return section.el;
+}
+
+function buildStyleTab(tab: HTMLDivElement, context: SettingsContext): void {
+  tab.appendChild(makeToggle("Labels", settings.showLabels, (v) => { settings.showLabels = v; saveSettings(); }));
+  tab.appendChild(makeToggle(
     "Structure labels",
     settings.showStructureLabels,
     (v) => { settings.showStructureLabels = v; saveSettings(); },
     "Show labels on grouping nodes (domains in domain mode, devices in device mode)"
   ));
-  styleTab.appendChild(makeToggle(
+  tab.appendChild(makeToggle(
     "Entity icons",
     settings.showIcons,
     (v) => { settings.showIcons = v; saveSettings(); },
     "Render Material Design Icons on entity nodes (resolved from Home Assistant)"
   ));
-  changedOnlyToggle = makeToggle("Skip unchanged", settings.changedOnly, (v) => {
+  context.controls.changedOnlyToggle = makeToggle("Skip unchanged", settings.changedOnly, (v) => {
     settings.changedOnly = v;
     saveSettings();
   }, "Skip glow when state value hasn't changed");
-  styleTab.appendChild(changedOnlyToggle);
+  tab.appendChild(context.controls.changedOnlyToggle);
 
-  syncSettingsState();
-
-  styleTab.appendChild(makeSlider("Label size", 4, 24, settings.labelSize, 1, (v) => { settings.labelSize = v; saveSettings(); }));
-  styleTab.appendChild(makeSlider("Entity label zoom", 0.5, 5, settings.entityLabelZoom, 0.1, (v) => { settings.entityLabelZoom = v; saveSettings(); }, "Zoom level to show entity labels"));
-  styleTab.appendChild(makeSlider("Entity dot size", 1, 16, settings.entityDotSize, 0.5, (v) => {
+  tab.appendChild(makeSlider("Label size", 4, 24, settings.labelSize, 1, (v) => { settings.labelSize = v; saveSettings(); }));
+  tab.appendChild(makeSlider("Entity label zoom", 0.5, 5, settings.entityLabelZoom, 0.1, (v) => { settings.entityLabelZoom = v; saveSettings(); }, "Zoom level to show entity labels"));
+  tab.appendChild(makeSlider("Entity dot size", 1, 16, settings.entityDotSize, 0.5, (v) => {
     settings.entityDotSize = v;
     for (const fn of fnodes) {
       if (fn.tree.kind === "entity") fn.r = v;
     }
     saveSettings();
   }));
-  styleTab.appendChild(makeSlider("Connection brightness", 0, 3, settings.lineGlow, 0.1, (v) => { settings.lineGlow = v; saveSettings(); }, "Opacity of parent-child connection lines"));
+  tab.appendChild(makeSlider("Connection brightness", 0, 3, settings.lineGlow, 0.1, (v) => { settings.lineGlow = v; saveSettings(); }, "Opacity of parent-child connection lines"));
 
-  // -- Colors --
   const colorsSection = makeSection("Colors");
 
   const bgSwatch = document.createElement("label");
@@ -1227,8 +1191,7 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
     input.addEventListener("input", () => {
       dot.style.background = input.value;
       setDomainColor(domain, input.value);
-      spriteCache.clear();
-      glowSpriteCache.clear();
+      clearColorCaches();
       ensureLoop();
     });
 
@@ -1243,7 +1206,7 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   }
   colorsSection.body.appendChild(colorGrid);
 
-  function syncColorSwatches(): void {
+  context.syncColorSwatches = () => {
     const colors = getDomainColors();
     for (const swatch of colorGrid.children) {
       const el = swatch as HTMLLabelElement;
@@ -1255,23 +1218,21 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
         inp.value = colors[d];
       }
     }
-  }
+  };
 
-  styleTab.appendChild(colorsSection.el);
+  tab.appendChild(colorsSection.el);
+}
 
-  // =====================
-  // ADVANCED TAB
-  // =====================
+function buildAdvancedTab(tab: HTMLDivElement, context: SettingsContext): void {
+  const { container } = context;
 
-  // -- Physics --
   const physicsSection = makeSection("Physics");
   physicsSection.body.appendChild(makeSlider("Repulsion", 100, 3000, settings.repulsion, 10, (v) => { settings.repulsion = v; reheat(); saveSettings(); }));
   physicsSection.body.appendChild(makeSlider("Spring length", 10, 120, settings.springLen, 1, (v) => { settings.springLen = v; reheat(); saveSettings(); }));
   physicsSection.body.appendChild(makeSlider("Spring stiffness", 0.005, 0.15, settings.springK, 0.005, (v) => { settings.springK = v; reheat(); saveSettings(); }, "Pull strength between connected nodes"));
   physicsSection.body.appendChild(makeSlider("Damping", 0.5, 0.99, settings.damping, 0.01, (v) => { settings.damping = v; reheat(); saveSettings(); }, "Velocity decay per frame"));
-  advancedTab.appendChild(physicsSection.el);
+  tab.appendChild(physicsSection.el);
 
-  // -- Actions --
   const buttons = document.createElement("div");
   buttons.className = "force-buttons";
 
@@ -1280,9 +1241,8 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   randomColorBtn.textContent = "Randomize colors";
   randomColorBtn.addEventListener("click", () => {
     randomizeColors();
-    spriteCache.clear();
-    glowSpriteCache.clear();
-    syncColorSwatches();
+    clearColorCaches();
+    context.syncColorSwatches();
     ensureLoop();
   });
   buttons.appendChild(randomColorBtn);
@@ -1292,19 +1252,14 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   resetAllBtn.textContent = "Reset all settings";
   resetAllBtn.addEventListener("click", () => {
     resetColors();
-    spriteCache.clear();
-    glowSpriteCache.clear();
+    clearColorCaches();
     applySettings({});
-    revealedNodes.clear();
+    resetReveals();
     collapsedNodes.clear();
-    pendingReveals = [];
-    if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; }
     stateChangeCounts.clear();
     searchQuery = "";
-    searchInput.value = "";
-    automationEdges = [];
-    automationEdgesByEntity = new Map();
-    automationLoaded = false;
+    context.searchInput.value = "";
+    resetAutomationState();
     automationLoading = false;
     transform = createTransform();
     saveSettings();
@@ -1345,8 +1300,7 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
           const data = JSON.parse(text);
           if (data.settings) applySettings(data.settings);
           if (data.colors) setDomainColors(data.colors);
-          spriteCache.clear();
-          glowSpriteCache.clear();
+          clearColorCaches();
           removeSettings();
           settingsPanel = createSettings(container);
           rebuildWithStructure();
@@ -1360,44 +1314,42 @@ function createSettings(container: HTMLElement): { toolbar: HTMLDivElement } {
   });
   buttons.appendChild(importBtn);
 
-  advancedTab.appendChild(buttons);
+  tab.appendChild(buttons);
 
-  // -- Connection (standalone only) --
-  if (reconnectCallback) {
-    const connectionSection = makeSection("Connection");
+  if (reconnectCallback) tab.appendChild(buildConnectionSection());
+}
 
-    const savedCreds = loadCredentials();
+function buildConnectionSection(): HTMLDivElement {
+  const connectionSection = makeSection("Connection");
+  const savedCreds = loadCredentials();
 
-    const urlInput = document.createElement("input");
-    urlInput.type = "url";
-    urlInput.className = "force-search";
-    urlInput.placeholder = "https://homeassistant.local:8123";
-    urlInput.value = savedCreds?.url ?? "";
-    connectionSection.body.appendChild(urlInput);
+  const urlInput = document.createElement("input");
+  urlInput.type = "url";
+  urlInput.className = "force-search";
+  urlInput.placeholder = "https://homeassistant.local:8123";
+  urlInput.value = savedCreds?.url ?? "";
+  connectionSection.body.appendChild(urlInput);
 
-    const tokenInput = document.createElement("input");
-    tokenInput.type = "password";
-    tokenInput.className = "force-search";
-    tokenInput.placeholder = "Long-lived access token";
-    tokenInput.value = savedCreds?.token ?? "";
-    connectionSection.body.appendChild(tokenInput);
+  const tokenInput = document.createElement("input");
+  tokenInput.type = "password";
+  tokenInput.className = "force-search";
+  tokenInput.placeholder = "Long-lived access token";
+  tokenInput.value = savedCreds?.token ?? "";
+  connectionSection.body.appendChild(tokenInput);
 
-    const reconnectBtn = document.createElement("button");
-    reconnectBtn.className = "force-reset-btn";
-    reconnectBtn.textContent = "Reconnect";
-    reconnectBtn.addEventListener("click", () => {
-      const url = urlInput.value.trim();
-      const token = tokenInput.value.trim();
-      if (!url || !token) return;
-      saveCredentials({ url, token });
-      reconnectCallback!({ url, token });
-    });
-    connectionSection.body.appendChild(reconnectBtn);
+  const reconnectBtn = document.createElement("button");
+  reconnectBtn.className = "force-reset-btn";
+  reconnectBtn.textContent = "Reconnect";
+  reconnectBtn.addEventListener("click", () => {
+    const url = urlInput.value.trim();
+    const token = tokenInput.value.trim();
+    if (!url || !token) return;
+    saveCredentials({ url, token });
+    reconnectCallback!({ url, token });
+  });
+  connectionSection.body.appendChild(reconnectBtn);
 
-    advancedTab.appendChild(connectionSection.el);
-  }
-
-  return { toolbar };
+  return connectionSection.el;
 }
 
 function makeToggle(label: string, initial: boolean, onChange: (v: boolean) => void, tooltip?: string): HTMLLabelElement {
@@ -1578,13 +1530,8 @@ async function loadAutomationEdges(): Promise<void> {
 
   automationEdgesByEntity = new Map();
   for (const edge of automationEdges) {
-    let list = automationEdgesByEntity.get(edge.automationEntityId);
-    if (!list) { list = []; automationEdgesByEntity.set(edge.automationEntityId, list); }
-    list.push(edge);
-
-    list = automationEdgesByEntity.get(edge.targetEntityId);
-    if (!list) { list = []; automationEdgesByEntity.set(edge.targetEntityId, list); }
-    list.push(edge);
+    pushToMap(automationEdgesByEntity, edge.automationEntityId, edge);
+    pushToMap(automationEdgesByEntity, edge.targetEntityId, edge);
   }
 
   automationLoaded = true;
@@ -1655,9 +1602,7 @@ function getAutomationTooltipHtml(entityId: string): string {
     const byRelation = new Map<AutomationRelation, string[]>();
     for (const edge of edges) {
       if (edge.automationEntityId !== entityId) continue;
-      let list = byRelation.get(edge.relation);
-      if (!list) { list = []; byRelation.set(edge.relation, list); }
-      list.push(edge.targetEntityId);
+      pushToMap(byRelation, edge.relation, edge.targetEntityId);
     }
 
     if (byRelation.size === 0) return "";
@@ -1675,9 +1620,7 @@ function getAutomationTooltipHtml(entityId: string): string {
   const byAutomation = new Map<string, AutomationRelation[]>();
   for (const edge of edges) {
     if (edge.targetEntityId !== entityId) continue;
-    let list = byAutomation.get(edge.automationEntityId);
-    if (!list) { list = []; byAutomation.set(edge.automationEntityId, list); }
-    list.push(edge.relation);
+    pushToMap(byAutomation, edge.automationEntityId, edge.relation);
   }
 
   if (byAutomation.size === 0) return "";
@@ -1710,34 +1653,14 @@ function pruneEmptyBranches(nodes: TreeNode[]): TreeNode[] {
   return nodes.filter((n) => n.kind === "entity" || n.kind === "root" || hasDescendant.has(n));
 }
 
-function buildGraph(root: TreeNode): void {
-  const allNodes = flattenTree(root);
-
-  allTreeNodesById = new Map();
-  allEntityTreeNodes = new Map();
-  for (const n of allNodes) {
-    allTreeNodesById.set(n.id, n);
-    if (n.kind === "entity" && n.entityId) {
-      allEntityTreeNodes.set(n.entityId, n);
-    }
-  }
-
+function filterNodes(allNodes: TreeNode[]): TreeNode[] {
   let nodes: TreeNode[];
   if (!settings.showEntities) {
     nodes = allNodes.filter((n) => n.kind !== "entity");
   } else if (settings.unavailableMode === "hidden") {
-    nodes = allNodes.filter((n) => {
-      if (n.kind !== "entity" || !n.entityId) return true;
-      const state = currentStates.get(n.entityId);
-      return !(state && state.state === "unavailable");
-    });
+    nodes = allNodes.filter((n) => n.kind !== "entity" || !isTreeUnavailable(n));
   } else if (settings.unavailableMode === "only") {
-    nodes = allNodes.filter((n) => {
-      if (n.kind !== "entity") return true;
-      if (!n.entityId) return false;
-      const state = currentStates.get(n.entityId);
-      return state !== undefined && state.state === "unavailable";
-    });
+    nodes = allNodes.filter((n) => n.kind !== "entity" || isTreeUnavailable(n));
   } else {
     nodes = allNodes;
   }
@@ -1791,12 +1714,7 @@ function buildGraph(root: TreeNode): void {
   }
 
   if (settings.searchAsFilter && searchQuery) {
-    nodes = nodes.filter((n) => {
-      if (n.kind !== "entity") return true;
-      const label = n.label.toLowerCase();
-      const id = (n.entityId ?? n.id).toLowerCase();
-      return label.includes(searchQuery) || id.includes(searchQuery);
-    });
+    nodes = nodes.filter((n) => n.kind !== "entity" || treeMatchesSearch(n));
     nodes = pruneEmptyBranches(nodes);
   }
 
@@ -1811,47 +1729,72 @@ function buildGraph(root: TreeNode): void {
     });
   }
 
+  return nodes;
+}
+
+function radialLayout(nodes: TreeNode[], cx: number, cy: number): Map<TreeNode, { x: number; y: number }> {
+  const positions = new Map<TreeNode, { x: number; y: number }>();
+  const nodeSet = new Set(nodes);
+  function place(node: TreeNode, x: number, y: number, angleStart: number, angleSpan: number, depth: number): void {
+    positions.set(node, { x, y });
+    const children = node.children.filter((c) => nodeSet.has(c));
+    if (children.length === 0) return;
+    const radius = settings.springLen * (depth === 0 ? 1.5 : 1);
+    let offset = angleStart;
+    const totalLeaves = children.reduce((s, c) => s + Math.max(1, c.leafCount), 0);
+    for (const child of children) {
+      const share = (Math.max(1, child.leafCount) / totalLeaves) * angleSpan;
+      const angle = offset + share / 2;
+      place(child, x + Math.cos(angle) * radius, y + Math.sin(angle) * radius, offset, share, depth + 1);
+      offset += share;
+    }
+  }
+  const rootNode = nodes.find((n) => n.kind === "root");
+  if (rootNode) place(rootNode, cx, cy, 0, Math.PI * 2, 0);
+  return positions;
+}
+
+function createFNode(tree: TreeNode, x: number, y: number): FNode {
+  const r = tree.kind === "root" ? 10 : tree.kind === "area" ? 8
+    : (tree.kind === "domain" || tree.kind === "device") ? 6 : settings.entityDotSize;
+  let hash = 0;
+  for (let i = 0; i < tree.id.length; i++) hash = ((hash << 5) - hash + tree.id.charCodeAt(i)) | 0;
+  return {
+    tree,
+    x, y,
+    vx: 0, vy: 0,
+    fx: null, fy: null,
+    r,
+    phase: (hash & 0xffff) / 0xffff * Math.PI * 2,
+  };
+}
+
+function buildGraph(root: TreeNode): void {
+  const allNodes = flattenTree(root);
+
+  allTreeNodesById = new Map();
+  allEntityTreeNodes = new Map();
+  for (const n of allNodes) {
+    allTreeNodesById.set(n.id, n);
+    if (n.kind === "entity" && n.entityId) {
+      allEntityTreeNodes.set(n.entityId, n);
+    }
+  }
+
+  const nodes = filterNodes(allNodes);
+
   const map = new Map<TreeNode, FNode>();
   const cx = width / 2 || 400;
   const cy = height / 2 || 300;
-
-  // Radial tree layout for initial positions (when layout is "tree")
-  const positions = new Map<TreeNode, { x: number; y: number }>();
-  if (settings.initialLayout === "tree") {
-    const nodeSet = new Set(nodes);
-    function layoutRadial(node: TreeNode, x: number, y: number, angleStart: number, angleSpan: number, depth: number): void {
-      positions.set(node, { x, y });
-      const children = node.children.filter((c) => nodeSet.has(c));
-      if (children.length === 0) return;
-      const radius = settings.springLen * (depth === 0 ? 1.5 : 1);
-      let offset = angleStart;
-      const totalLeaves = children.reduce((s, c) => s + Math.max(1, c.leafCount), 0);
-      for (const child of children) {
-        const share = (Math.max(1, child.leafCount) / totalLeaves) * angleSpan;
-        const angle = offset + share / 2;
-        layoutRadial(child, x + Math.cos(angle) * radius, y + Math.sin(angle) * radius, offset, share, depth + 1);
-        offset += share;
-      }
-    }
-    const rootNode = nodes.find((n) => n.kind === "root");
-    if (rootNode) layoutRadial(rootNode, cx, cy, 0, Math.PI * 2, 0);
-  }
+  const positions = settings.initialLayout === "tree" ? radialLayout(nodes, cx, cy) : new Map<TreeNode, { x: number; y: number }>();
 
   fnodes = nodes.map((n) => {
-    const r = n.kind === "root" ? 10 : n.kind === "area" ? 8
-      : (n.kind === "domain" || n.kind === "device") ? 6 : settings.entityDotSize;
-    let hash = 0;
-    for (let i = 0; i < n.id.length; i++) hash = ((hash << 5) - hash + n.id.charCodeAt(i)) | 0;
     const pos = positions.get(n);
-    const fn: FNode = {
-      tree: n,
-      x: pos ? pos.x : cx + (Math.random() - 0.5) * 600,
-      y: pos ? pos.y : cy + (Math.random() - 0.5) * 400,
-      vx: 0, vy: 0,
-      fx: null, fy: null,
-      r,
-      phase: (hash & 0xffff) / 0xffff * Math.PI * 2,
-    };
+    const fn = createFNode(
+      n,
+      pos ? pos.x : cx + (Math.random() - 0.5) * 600,
+      pos ? pos.y : cy + (Math.random() - 0.5) * 400,
+    );
     map.set(n, fn);
     return fn;
   });
@@ -1886,7 +1829,7 @@ function buildGraph(root: TreeNode): void {
   if (settings.initialLayout === "tree") {
     for (let i = 0; i < 150; i++) {
       simulate();
-      alpha *= alphaDecay;
+      alpha *= ALPHA_DECAY;
     }
   }
 }
@@ -1916,7 +1859,7 @@ function tick(): void {
 
   if (alpha > 0.001) {
     simulate();
-    alpha *= alphaDecay;
+    alpha *= ALPHA_DECAY;
   }
 
   draw();
@@ -2026,7 +1969,7 @@ function quadRepulse(quad: QuadNode, fn: FNode, ra: number): void {
     return;
   }
 
-  // Barnes-Hut criterion: cell width / distance < theta → approximate
+  // Barnes-Hut criterion: cell width / distance < theta -> approximate
   const s = quad.x1 - quad.x0;
   if (s * s < BH_THETA * BH_THETA * d2) {
     const dist2 = Math.max(d2, 1);
@@ -2155,7 +2098,7 @@ function drawHull(ctx: CanvasRenderingContext2D, cluster: Cluster): void {
 
   ctx.closePath();
 
-  const fillColor = color(cluster.groupNode);
+  const fillColor = nodeColor(cluster.groupNode.kind, cluster.groupNode.domain);
   ctx.fillStyle = fillColor;
   ctx.globalAlpha = 0.08;
   ctx.fill();
@@ -2173,6 +2116,11 @@ function drawLabels(ctx: CanvasRenderingContext2D): void {
   const parentFontSize = (settings.labelSize * 1.4) / transform.k;
   const pad = 3 / transform.k;
   const radius = 3 / transform.k;
+  const middleFontSize = settings.labelSize * 1.15;
+  const middlePad = 3;
+  const middleRadius = 3;
+  const middleGap = 2;
+  const cullMargin = Math.max(600, entityFontSize * 30);
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
 
@@ -2189,18 +2137,10 @@ function drawLabels(ctx: CanvasRenderingContext2D): void {
     if (isMiddle && !settings.showStructureLabels) continue;
     // Entity font grows as 1/k in world units, so scale the margin with it or
     // long labels clip at screen edges under extreme slider settings.
-    if (!inView(n.x, n.y, Math.max(600, entityFontSize * 30))) continue;
+    if (!inView(n.x, n.y, cullMargin)) continue;
 
-    let labelAlpha = 1;
-    if (isEntity) {
-      labelAlpha = Math.min(1, (transform.k - settings.entityLabelZoom) / 0.5);
-    }
-
-    const alpha = Math.max(0.3, labelAlpha);
-    const middleFontSize = settings.labelSize * 1.15;
-    const middlePad = 3;
-    const middleRadius = 3;
-    const middleGap = 2;
+    const zoomFade = isEntity ? Math.min(1, (transform.k - settings.entityLabelZoom) / 0.5) : 1;
+    const labelAlpha = Math.max(0.3, zoomFade);
 
     let fontSize: number;
     let weight: number;
@@ -2217,18 +2157,9 @@ function drawLabels(ctx: CanvasRenderingContext2D): void {
       fontSize = entityFontSize;
       weight = 400;
     }
-    ctx.font = `${weight} ${fontSize}px ${FONT_FAMILY}`;
-
     const gap = isMiddle ? middleGap : 2 / transform.k;
-    const labelY = n.y + n.r + gap;
     const metrics = measureLabel(ctx, n.tree.label, weight, fontSize);
-    const textWidth = metrics.width;
-    const ascent = metrics.ascent;
-    const descent = metrics.descent;
-    const textH = ascent + descent;
-    const textY = labelY + ascent;
-    const labelPad = isMiddle ? middlePad : pad;
-    const labelRadius = isMiddle ? middleRadius : radius;
+    const textY = n.y + n.r + gap + metrics.ascent;
 
     if (isGlass && glassContainer) {
       // Position glass overlay div for root/area labels
@@ -2245,30 +2176,32 @@ function drawLabels(ctx: CanvasRenderingContext2D): void {
       const screenFontSize = baseFontSize * transform.k;
       const padY = 2 * transform.k;
       const padX = 8 * transform.k;
-      const weight = kind === "root" ? "700" : "600";
+      const glassWeight = kind === "root" ? "700" : "600";
       div.textContent = n.tree.label;
       div.style.left = `${screenX}px`;
       div.style.top = `${screenY}px`;
       div.style.fontSize = `${screenFontSize}px`;
       div.style.padding = `${padY}px ${padX}px`;
-      div.style.fontWeight = weight;
-      div.style.opacity = String(alpha);
+      div.style.fontWeight = glassWeight;
+      div.style.opacity = String(labelAlpha);
       div.style.display = "";
     } else {
-      // Canvas roundRect background for domain/device/entity labels
-      ctx.globalAlpha = alpha * 0.5;
+      const labelPad = isMiddle ? middlePad : pad;
+      const labelRadius = isMiddle ? middleRadius : radius;
+      ctx.font = `${weight} ${fontSize}px ${FONT_FAMILY}`;
+      ctx.globalAlpha = labelAlpha * 0.5;
       ctx.fillStyle = "#000000";
       ctx.beginPath();
       ctx.roundRect(
-        n.x - textWidth / 2 - labelPad,
-        textY - ascent - labelPad,
-        textWidth + labelPad * 2,
-        textH + labelPad * 2,
+        n.x - metrics.width / 2 - labelPad,
+        textY - metrics.ascent - labelPad,
+        metrics.width + labelPad * 2,
+        metrics.ascent + metrics.descent + labelPad * 2,
         labelRadius
       );
       ctx.fill();
 
-      ctx.globalAlpha = alpha;
+      ctx.globalAlpha = labelAlpha;
       ctx.fillStyle = isEntity ? "#bbb" : "#e0e0e0";
       ctx.fillText(n.tree.label, n.x, textY);
     }
@@ -2283,11 +2216,7 @@ function drawLabels(ctx: CanvasRenderingContext2D): void {
 }
 
 function transparent(hex: string): string {
-  // Expand shorthand #rgb to #rrggbb before appending alpha
-  if (hex.length === 4) {
-    hex = "#" + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
-  }
-  return hex + "00";
+  return expandHex(hex) + "00";
 }
 
 function expandHex(hex: string): string {
@@ -2310,11 +2239,14 @@ function rgbaFromHex(hex: string, alpha: number, whiten = 0): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-function matchesSearch(fn: FNode): boolean {
-  if (!searchQuery) return false;
-  const label = fn.tree.label.toLowerCase();
-  const id = (fn.tree.entityId ?? fn.tree.id).toLowerCase();
+function treeMatchesSearch(node: TreeNode): boolean {
+  const label = node.label.toLowerCase();
+  const id = (node.entityId ?? node.id).toLowerCase();
   return label.includes(searchQuery) || id.includes(searchQuery);
+}
+
+function matchesSearch(fn: FNode): boolean {
+  return searchQuery !== "" && treeMatchesSearch(fn.tree);
 }
 
 function drawSearchHighlights(ctx: CanvasRenderingContext2D): void {
@@ -2323,67 +2255,55 @@ function drawSearchHighlights(ctx: CanvasRenderingContext2D): void {
   for (const fn of fnodes) {
     if (!matchesSearch(fn)) continue;
 
-    const nodeCol = color(fn.tree);
-    const highlightR = fn.r * 3;
-    if (!inView(fn.x, fn.y, highlightR)) continue;
-
-    ctx.globalAlpha = 0.5;
-    ctx.drawImage(getGlowSprite("ring3", nodeCol), fn.x - highlightR, fn.y - highlightR, highlightR * 2, highlightR * 2);
-
-    ctx.beginPath();
-    ctx.arc(fn.x, fn.y, fn.r + 2 / transform.k, 0, Math.PI * 2);
-    ctx.strokeStyle = "#fff";
-    ctx.globalAlpha = 0.9;
-    ctx.lineWidth = 2 / transform.k;
-    ctx.stroke();
+    if (!inView(fn.x, fn.y, fn.r * 3)) continue;
+    drawRingHighlight(ctx, fn, "ring3", 3, 0.5, 2, 0.9);
   }
 
   ctx.globalAlpha = 1;
 }
 
 function drawHoverHighlight(ctx: CanvasRenderingContext2D, fn: FNode): void {
-  const nodeCol = color(fn.tree);
-  const haloR = fn.r * 2.5;
+  drawRingHighlight(ctx, fn, "ring25", 2.5, 0.4, 1.5, 0.7);
+  ctx.globalAlpha = 1;
+}
 
-  ctx.globalAlpha = 0.4;
-  ctx.drawImage(getGlowSprite("ring25", nodeCol), fn.x - haloR, fn.y - haloR, haloR * 2, haloR * 2);
+function drawRingHighlight(
+  ctx: CanvasRenderingContext2D, fn: FNode, profile: GlowSpriteProfile,
+  haloScale: number, haloAlpha: number, ringWidth: number, ringAlpha: number,
+): void {
+  const haloR = fn.r * haloScale;
+  ctx.globalAlpha = haloAlpha;
+  ctx.drawImage(getGlowSprite(profile, nodeColor(fn.tree.kind, fn.tree.domain)), fn.x - haloR, fn.y - haloR, haloR * 2, haloR * 2);
 
   ctx.beginPath();
-  ctx.arc(fn.x, fn.y, fn.r + 1.5 / transform.k, 0, Math.PI * 2);
+  ctx.arc(fn.x, fn.y, fn.r + ringWidth / transform.k, 0, Math.PI * 2);
   ctx.strokeStyle = "#fff";
-  ctx.globalAlpha = 0.7;
-  ctx.lineWidth = 1.5 / transform.k;
+  ctx.globalAlpha = ringAlpha;
+  ctx.lineWidth = ringWidth / transform.k;
   ctx.stroke();
-
-  ctx.globalAlpha = 1;
 }
 
 function drawGlows(ctx: CanvasRenderingContext2D): void {
   const now = performance.now();
-  const expired: FNode[] = [];
+  pruneExpiredGlows(now);
 
   for (const [fn, startTime] of glowTimestamps) {
     const elapsed = now - startTime;
-    if (elapsed > GLOW_DURATION) {
-      expired.push(fn);
-      continue;
-    }
-
     const progress = elapsed / GLOW_DURATION;
     const ease = 1 - (1 - progress) * (1 - progress);
     const ringRadius = fn.r * (1 + ease * 11);
     const opacity = 1 - progress;
-    const nodeColor = color(fn.tree);
+    const glowColor = nodeColor(fn.tree.kind, fn.tree.domain);
 
     ctx.beginPath();
     ctx.arc(fn.x, fn.y, ringRadius, 0, Math.PI * 2);
-    ctx.fillStyle = nodeColor;
+    ctx.fillStyle = glowColor;
     ctx.globalAlpha = opacity * 0.2 * settings.glowBrightness;
     ctx.fill();
 
     ctx.beginPath();
     ctx.arc(fn.x, fn.y, ringRadius, 0, Math.PI * 2);
-    ctx.strokeStyle = nodeColor;
+    ctx.strokeStyle = glowColor;
     ctx.globalAlpha = opacity * 0.9 * settings.glowBrightness;
     ctx.lineWidth = (3 + 4 * (1 - progress)) / transform.k;
     ctx.stroke();
@@ -2399,9 +2319,14 @@ function drawGlows(ctx: CanvasRenderingContext2D): void {
 
     ctx.globalAlpha = 1;
   }
+}
 
-  for (const fn of expired) {
-    glowTimestamps.delete(fn);
+function pruneExpiredGlows(now: number): void {
+  for (const [fn, startTime] of glowTimestamps) {
+    if (now - startTime > GLOW_DURATION) {
+      glowTimestamps.delete(fn);
+      pulseWaveFields.delete(fn);
+    }
   }
 }
 
@@ -2462,11 +2387,11 @@ function drawConstellation(ctx: CanvasRenderingContext2D, now: number): void {
     let edgeAlpha: number;
     let edgeWidth: number;
     if (sc && sc === tc) {
-      edgeColor = color(sc.groupNode);
+      edgeColor = nodeColor(sc.groupNode.kind, sc.groupNode.domain);
       edgeAlpha = 0.25;
       edgeWidth = 0.5 * invK;
     } else if (e.source.tree.kind !== "entity" && e.target.tree.kind !== "entity") {
-      edgeColor = color(e.source.tree);
+      edgeColor = nodeColor(e.source.tree.kind, e.source.tree.domain);
       edgeAlpha = 0.35;
       edgeWidth = 0.6 * invK;
     } else {
@@ -2537,28 +2462,37 @@ function drawConstellation(ctx: CanvasRenderingContext2D, now: number): void {
     if (!inView(fn.x, fn.y, entityCullMargin)) continue;
 
     const unavail = isUnavailable(fn) && (settings.unavailableMode === "pulse" || settings.unavailableMode === "ring");
-    const twinkle = settings.twinkleSpeed === 0 ? 1 : 0.5 + 0.5 * Math.sin(now * 0.003 * settings.twinkleSpeed + fn.phase);
-    const pulse = twinkle * twinkle;
+    const pulse = twinkleFactor(fn, now);
     const baseAlpha = unavail ? 0.15 : 0.5;
     const twinklePulse = settings.twinkleMin + (1 - settings.twinkleMin) * pulse;
     const haloAlpha = Math.min(1, baseAlpha * twinklePulse * settings.glowBrightness);
     const coreAlpha = Math.min(1, twinklePulse * (unavail ? 0.4 : 1));
 
-    const nodeCol = unavail ? "#666" : color(fn.tree);
-    const starR = 5 * starScale;
+    const nodeCol = unavail ? "#666" : nodeColor(fn.tree.kind, fn.tree.domain);
     const sizePulse = 1 + settings.twinkleSize * (pulse - 0.5);
-    const haloR = starR * settings.glowSize * settings.glowIntensity * sizePulse;
-    const sprite = getStarSprite(nodeCol, settings.glowIntensity);
-    const drawSize = haloR * 2;
-
-    ctx.globalAlpha = haloAlpha;
-    ctx.drawImage(sprite.halo, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
-    ctx.globalAlpha = coreAlpha;
-    ctx.drawImage(sprite.core, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
+    const haloR = 5 * starScale * settings.glowSize * settings.glowIntensity * sizePulse;
+    drawStar(ctx, fn, nodeCol, settings.glowIntensity, haloR, haloAlpha, coreAlpha);
   }
 
   ctx.globalCompositeOperation = "source-over";
   ctx.globalAlpha = 1;
+}
+
+function twinkleFactor(fn: FNode, now: number): number {
+  const twinkle = settings.twinkleSpeed === 0 ? 1 : 0.5 + 0.5 * Math.sin(now * 0.003 * settings.twinkleSpeed + fn.phase);
+  return twinkle * twinkle;
+}
+
+function drawStar(
+  ctx: CanvasRenderingContext2D, fn: FNode, nodeCol: string, intensity: number,
+  haloR: number, haloAlpha: number, coreAlpha: number,
+): void {
+  const sprite = getStarSprite(nodeCol, intensity);
+  const drawSize = haloR * 2;
+  ctx.globalAlpha = haloAlpha;
+  ctx.drawImage(sprite.halo, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
+  ctx.globalAlpha = coreAlpha;
+  ctx.drawImage(sprite.core, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
 }
 
 function drawConstellationParents(ctx: CanvasRenderingContext2D, now: number): void {
@@ -2572,23 +2506,16 @@ function drawConstellationParents(ctx: CanvasRenderingContext2D, now: number): v
     if (fn.tree.kind === "entity") continue;
     if (!inView(fn.x, fn.y, parentCullMargin)) continue;
 
-    const twinkle = settings.twinkleSpeed === 0 ? 1 : 0.5 + 0.5 * Math.sin(now * 0.003 * settings.twinkleSpeed + fn.phase);
-    const pulse = twinkle * twinkle;
+    const pulse = twinkleFactor(fn, now);
     const twinklePulse = settings.twinkleMin + (1 - settings.twinkleMin) * pulse;
     const haloAlpha = Math.min(1, 0.9 * twinklePulse * settings.glowBrightness);
     const coreAlpha = Math.min(1, twinklePulse);
 
-    const nodeCol = color(fn.tree);
+    const nodeCol = nodeColor(fn.tree.kind, fn.tree.domain);
     const starR = (fn.tree.kind === "root" ? 14 : 9) * starScale;
     const sizePulse = 1 + settings.twinkleSize * (pulse - 0.5);
     const haloR = starR * settings.glowSize * pgi * sizePulse;
-    const sprite = getStarSprite(nodeCol, pgi);
-    const drawSize = haloR * 2;
-
-    ctx.globalAlpha = haloAlpha;
-    ctx.drawImage(sprite.halo, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
-    ctx.globalAlpha = coreAlpha;
-    ctx.drawImage(sprite.core, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
+    drawStar(ctx, fn, nodeCol, pgi, haloR, haloAlpha, coreAlpha);
   }
 
   ctx.globalCompositeOperation = "source-over";
@@ -2610,31 +2537,20 @@ function drawConstellationHover(ctx: CanvasRenderingContext2D): void {
   const intensity = isEntity ? settings.glowIntensity : settings.parentGlowIntensity;
   const scale = 1 + 0.5 * ease;
   const haloR = starR * settings.glowSize * intensity * scale;
-  const nodeCol = color(fn.tree);
-  const sprite = getStarSprite(nodeCol, intensity);
-  const drawSize = haloR * 2;
 
   ctx.globalCompositeOperation = "screen";
-  ctx.globalAlpha = 0.6 * ease;
-  ctx.drawImage(sprite.halo, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
-  ctx.globalAlpha = ease;
-  ctx.drawImage(sprite.core, fn.x - haloR, fn.y - haloR, drawSize, drawSize);
+  drawStar(ctx, fn, nodeColor(fn.tree.kind, fn.tree.domain), intensity, haloR, 0.6 * ease, ease);
   ctx.globalCompositeOperation = "source-over";
   ctx.globalAlpha = 1;
 }
 
 function drawStarEffects(ctx: CanvasRenderingContext2D, now: number): void {
-  const expired: FNode[] = [];
+  pruneExpiredGlows(now);
   const ss = settings.starSize * settings.effectScale / Math.sqrt(transform.k);
 
   for (const [fn, startTime] of glowTimestamps) {
-    const elapsed = now - startTime;
-    if (elapsed > GLOW_DURATION) {
-      expired.push(fn);
-      continue;
-    }
-    const t = elapsed / GLOW_DURATION;
-    const nodeCol = color(fn.tree);
+    const t = (now - startTime) / GLOW_DURATION;
+    const nodeCol = nodeColor(fn.tree.kind, fn.tree.domain);
 
     switch (settings.starEffect) {
       case "supernova":
@@ -2653,11 +2569,6 @@ function drawStarEffects(ctx: CanvasRenderingContext2D, now: number): void {
         drawColorShift(ctx, fn, t, ss);
         break;
     }
-  }
-
-  for (const fn of expired) {
-    glowTimestamps.delete(fn);
-    pulseWaveFields.delete(fn);
   }
   ctx.globalAlpha = 1;
 }
@@ -2875,10 +2786,13 @@ function drawColorShift(ctx: CanvasRenderingContext2D, fn: FNode, t: number, ss:
   ctx.fill();
 }
 
+function isTreeUnavailable(node: TreeNode): boolean {
+  if (!node.entityId) return false;
+  return currentStates.get(node.entityId)?.state === "unavailable";
+}
+
 function isUnavailable(fn: FNode): boolean {
-  if (!fn.tree.entityId) return false;
-  const state = currentStates.get(fn.tree.entityId);
-  return state !== undefined && state.state === "unavailable";
+  return isTreeUnavailable(fn.tree);
 }
 
 function drawUnavailablePulses(ctx: CanvasRenderingContext2D, now: number): void {
@@ -2936,7 +2850,7 @@ function draw(): void {
     drawConstellation(ctx, now);
     drawStarEffects(ctx, now);
     drawConstellationParents(ctx, now);
-    if (settings.showAutomationEdges) drawAutomationEdges(ctx);
+    drawAutomationEdges(ctx);
     drawConstellationHover(ctx);
     drawUnavailablePulses(ctx, now);
     drawSearchHighlights(ctx);
@@ -2976,7 +2890,7 @@ function draw(): void {
       ctx.fillStyle = settings.backgroundColor;
       ctx.fill();
       ctx.globalAlpha = 0.12;
-      ctx.fillStyle = color(n.tree);
+      ctx.fillStyle = nodeColor(n.tree.kind, n.tree.domain);
       ctx.fill();
       ctx.globalAlpha = 0.5;
       ctx.strokeStyle = "#888";
@@ -2985,7 +2899,7 @@ function draw(): void {
       ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
       ctx.stroke();
     } else {
-      ctx.fillStyle = dimmed ? "#666" : color(n.tree);
+      ctx.fillStyle = dimmed ? "#666" : nodeColor(n.tree.kind, n.tree.domain);
       ctx.fill();
     }
 
@@ -3142,10 +3056,10 @@ function onMouseMove(e: MouseEvent): void {
       const collapsed = collapsedNodes.has(n.tree.id);
       extra += `<br><span style="color:#9e9e9e;font-size:0.7rem">${n.tree.leafCount} entities${collapsed ? " (collapsed)" : ""} · Shift+click to ${collapsed ? "expand" : "collapse"}</span>`;
     }
-    showTip(e.clientX, e.clientY, n.tree, currentStates, extra || undefined);
+    showTooltip(e.clientX, e.clientY, n.tree.label, n.tree.entityId, currentStates, extra || undefined);
     if (canvas) canvas.style.cursor = "pointer";
   } else {
-    hideTip();
+    hideTooltip();
     if (canvas) canvas.style.cursor = panning ? "grabbing" : "grab";
   }
   if (changed) ensureLoop();
@@ -3193,16 +3107,10 @@ function copyNodeId(node: TreeNode): void {
   navigator.clipboard.writeText(id).then(() => showToast(`Copied: ${id}`));
 }
 
-function openHaPage(node: TreeNode, page: "history" | "logbook"): void {
+function openEntityPage(entityId: string, page: "history" | "logbook"): void {
   const base = getHaUrl();
   if (!base) return;
-  const id = nodeActionId(node);
-  if (!id) return;
-  if (node.kind === "area") {
-    window.open(`${base}/config/areas/area/${id}`, "_blank");
-  } else {
-    window.open(`${base}/${page}?entity_id=${id}`, "_blank");
-  }
+  window.open(`${base}/${page}?entity_id=${entityId}`, "_blank");
 }
 
 interface ServiceAction {
@@ -3211,32 +3119,18 @@ interface ServiceAction {
   confirm?: boolean;
 }
 
+const ON_OFF_TOGGLE: ServiceAction[] = [
+  { label: "Toggle", service: "toggle" },
+  { label: "Turn on", service: "turn_on" },
+  { label: "Turn off", service: "turn_off" },
+];
+
 const SERVICE_ACTIONS: Record<string, ServiceAction[]> = {
-  light: [
-    { label: "Toggle", service: "toggle" },
-    { label: "Turn on", service: "turn_on" },
-    { label: "Turn off", service: "turn_off" },
-  ],
-  switch: [
-    { label: "Toggle", service: "toggle" },
-    { label: "Turn on", service: "turn_on" },
-    { label: "Turn off", service: "turn_off" },
-  ],
-  fan: [
-    { label: "Toggle", service: "toggle" },
-    { label: "Turn on", service: "turn_on" },
-    { label: "Turn off", service: "turn_off" },
-  ],
-  input_boolean: [
-    { label: "Toggle", service: "toggle" },
-    { label: "Turn on", service: "turn_on" },
-    { label: "Turn off", service: "turn_off" },
-  ],
-  humidifier: [
-    { label: "Toggle", service: "toggle" },
-    { label: "Turn on", service: "turn_on" },
-    { label: "Turn off", service: "turn_off" },
-  ],
+  light: ON_OFF_TOGGLE,
+  switch: ON_OFF_TOGGLE,
+  fan: ON_OFF_TOGGLE,
+  input_boolean: ON_OFF_TOGGLE,
+  humidifier: ON_OFF_TOGGLE,
   script: [
     { label: "Run", service: "turn_on" },
     { label: "Stop", service: "turn_off" },
@@ -3246,9 +3140,7 @@ const SERVICE_ACTIONS: Record<string, ServiceAction[]> = {
   ],
   automation: [
     { label: "Trigger", service: "trigger" },
-    { label: "Toggle", service: "toggle" },
-    { label: "Turn on", service: "turn_on" },
-    { label: "Turn off", service: "turn_off" },
+    ...ON_OFF_TOGGLE,
   ],
   cover: [
     { label: "Open", service: "open_cover" },
@@ -3365,7 +3257,7 @@ function onContextMenu(e: MouseEvent): void {
   const id = nodeActionId(node);
   if (!id) return;
 
-  hideTip();
+  hideTooltip();
 
   const rootRect = getRootElement().getBoundingClientRect();
   const menu = document.createElement("div");
@@ -3404,10 +3296,12 @@ function onContextMenu(e: MouseEvent): void {
   const haBase = getHaUrl();
   if (haBase) {
     if (node.entityId) {
-      addItem("View History", () => openHaPage(node, "history"));
-      addItem("View Logbook", () => openHaPage(node, "logbook"));
+      addItem("View History", () => openEntityPage(id, "history"));
+      addItem("View Logbook", () => openEntityPage(id, "logbook"));
     } else if (node.kind === "area") {
-      addItem("Open Area in HA", () => openHaPage(node, "history"));
+      addItem("Open Area in HA", () => {
+        window.open(`${haBase}/config/areas/area/${id}`, "_blank");
+      });
     } else if (node.kind === "device") {
       addItem("Open Device in HA", () => {
         window.open(`${haBase}/config/devices/device/${id}`, "_blank");
