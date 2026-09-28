@@ -4,10 +4,11 @@ import {
   type Connection,
 } from "home-assistant-js-websocket";
 
+export function normalizeUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
 export async function connect(url: string, token: string): Promise<Connection> {
-  // Strip trailing slash
-  const baseUrl = url.replace(/\/+$/, "");
-  const auth = createLongLivedTokenAuth(baseUrl, token);
-  const connection = await createConnection({ auth });
-  return connection;
+  const auth = createLongLivedTokenAuth(normalizeUrl(url), token);
+  return createConnection({ auth });
 }

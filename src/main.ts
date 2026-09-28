@@ -1,13 +1,9 @@
 import { renderLoginForm, loadCredentials, showLoginError, type LoginCredentials } from "./login";
-import { connect } from "./ha/connection";
-import { fetchRegistries } from "./ha/registry";
-import { buildTree, flattenTree } from "./tree/build";
+import { connect, normalizeUrl } from "./ha/connection";
 import type { HaState } from "./ha/types";
 import type { Connection } from "home-assistant-js-websocket";
 import { initDebugConsole, debugLog } from "./debug";
-import { subscribeToStates, fetchAllStates, watchConnection } from "./ha/states";
-import { showStatusBar, removeStatusBar, setStatusDisconnected } from "./statusBar";
-import { createForceViz } from "./viz/force";
+import { startSession, showLoading } from "./session";
 
 const loginContainer = document.getElementById("login")!;
 const treeContainer = document.getElementById("tree")!;
@@ -22,7 +18,7 @@ const savedCreds = loadCredentials();
 if (savedCreds) {
   loginContainer.hidden = true;
   treeContainer.hidden = false;
-  treeContainer.innerHTML = `<div class="loading"><div class="spinner"></div><span>Connecting...</span></div>`;
+  showLoading(treeContainer, "Connecting...");
   debugLog("auth", "Auto-connecting with saved credentials");
   handleLogin(savedCreds, true);
 } else {
@@ -34,9 +30,11 @@ async function handleLogin(creds: LoginCredentials, autoConnect = false) {
   connectInFlight = true;
 
   if (!autoConnect) {
-    const button = loginContainer.querySelector("button") as HTMLButtonElement;
-    button.disabled = true;
-    button.textContent = "Connecting...";
+    const button = loginContainer.querySelector("button");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Connecting...";
+    }
   }
 
   try {
@@ -46,9 +44,9 @@ async function handleLogin(creds: LoginCredentials, autoConnect = false) {
     loginContainer.hidden = true;
 
     treeContainer.hidden = false;
-    treeContainer.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading registries...</span></div>`;
+    showLoading(treeContainer, "Loading registries...");
 
-    debugLog("auth", "Connected to " + creds.url);
+    debugLog("auth", "Connected to " + normalizeUrl(creds.url));
     await initTree(connection);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Connection failed";
@@ -61,9 +59,11 @@ async function handleLogin(creds: LoginCredentials, autoConnect = false) {
       renderLoginForm(loginContainer, handleLogin);
       showLoginError(loginContainer, message);
     } else {
-      const button = loginContainer.querySelector("button") as HTMLButtonElement;
-      button.disabled = false;
-      button.textContent = "Connect";
+      const button = loginContainer.querySelector("button");
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Connect";
+      }
       showLoginError(loginContainer, message);
     }
   } finally {
@@ -72,37 +72,19 @@ async function handleLogin(creds: LoginCredentials, autoConnect = false) {
 }
 
 async function initTree(connection: Connection) {
-  const registries = await fetchRegistries(connection);
-  const root = buildTree(registries);
-
-  const nodes = flattenTree(root);
-
-  treeContainer.innerHTML = "";
-
-  const states = new Map<string, HaState>();
-
-  const forceViz = createForceViz(registries, undefined, connection, (creds) => {
-    teardownSession?.();
-    teardownSession = null;
-    activeConnection?.close();
-    activeConnection = null;
-    treeContainer.innerHTML = `<div class="loading"><div class="spinner"></div><span>Connecting...</span></div>`;
-    // autoConnect mode recovers to the login form on failure; the regular
-    // path would try to update a login button that is not on screen here.
-    handleLogin(creds, true);
-  });
-
-  const vizContainer = document.createElement("div");
-  vizContainer.id = "viz-container";
-  treeContainer.appendChild(vizContainer);
-  forceViz.create(vizContainer, root, states);
-
-  const unsubscribeStates = subscribeToStates(connection, states, forceViz);
-  const unwatchConnection = watchConnection(connection, {
-    onDisconnected: () => setStatusDisconnected(true),
-    onReady: () => {
-      setStatusDisconnected(false);
-      fetchAllStates(connection, states, forceViz);
+  const teardown = await startSession({
+    connection,
+    container: treeContainer,
+    states: new Map<string, HaState>(),
+    onReconnect: (creds) => {
+      teardownSession?.();
+      teardownSession = null;
+      activeConnection?.close();
+      activeConnection = null;
+      showLoading(treeContainer, "Connecting...");
+      // autoConnect mode recovers to the login form on failure; the regular
+      // path would try to update a login button that is not on screen here.
+      handleLogin(creds, true);
     },
     onAuthFailed: () => {
       connection.close();
@@ -116,14 +98,5 @@ async function initTree(connection: Connection) {
       showLoginError(loginContainer, "Authentication failed, please log in again");
     },
   });
-
-  teardownSession = () => {
-    unsubscribeStates();
-    unwatchConnection();
-    forceViz.destroy();
-    removeStatusBar();
-  };
-
-  debugLog("system", `Loaded ${nodes.length} nodes across ${registries.areas.length} areas`);
-  showStatusBar(`${nodes.length} nodes | ${registries.areas.length} areas`);
+  teardownSession = teardown;
 }

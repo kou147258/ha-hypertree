@@ -7,9 +7,19 @@ function ensureTooltip(): HTMLDivElement {
   if (!tooltipEl) {
     tooltipEl = document.createElement("div");
     tooltipEl.className = "tooltip";
-    getRootElement().appendChild(tooltipEl);
   }
+  const root = getRootElement();
+  if (tooltipEl.parentElement !== root) root.appendChild(tooltipEl);
   return tooltipEl;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export function showTooltip(
@@ -22,18 +32,19 @@ export function showTooltip(
 ): void {
   const el = ensureTooltip();
 
-  let html = `<strong>${label}</strong>`;
+  let html = `<strong>${escapeHtml(label)}</strong>`;
 
   if (entityId) {
     const state = states.get(entityId);
-    html += `<br><span class="tooltip-id">${entityId}</span>`;
+    html += `<br><span class="tooltip-id">${escapeHtml(entityId)}</span>`;
     if (state) {
-      html += `<br>State: <strong>${state.state}</strong>`;
+      html += `<br>State: <strong>${escapeHtml(state.state)}</strong>`;
       const changed = new Date(state.last_changed);
       html += `<br>Changed: ${changed.toLocaleString()}`;
     }
   }
 
+  // extraHtml is built by callers and trusted; they must escape their own data.
   if (extraHtml) {
     html += extraHtml;
   }

@@ -1,11 +1,8 @@
 import type { Connection } from "home-assistant-js-websocket";
 import { setRootElement } from "./rootElement";
-import { fetchRegistries } from "./ha/registry";
-import { buildTree, flattenTree } from "./tree/build";
+import { normalizeUrl } from "./ha/connection";
+import { startSession, showLoading } from "./session";
 import { initDebugConsole, debugLog } from "./debug";
-import { subscribeToStates, fetchAllStates, watchConnection } from "./ha/states";
-import { showStatusBar, setStatusDisconnected } from "./statusBar";
-import { createForceViz } from "./viz/force";
 import type { HaState } from "./ha/types";
 import styles from "./style.css?inline";
 
@@ -36,7 +33,10 @@ class HypertreePanel extends HTMLElement {
 
     this.container = document.createElement("div");
     this.container.id = "app";
-    this.container.innerHTML = `<div id="tree"><div class="loading"><div class="spinner"></div><span>Loading...</span></div></div>`;
+    const tree = document.createElement("div");
+    tree.id = "tree";
+    showLoading(tree, "Loading...");
+    this.container.appendChild(tree);
     shadow.appendChild(this.container);
 
     setRootElement(this.container);
@@ -61,51 +61,46 @@ class HypertreePanel extends HTMLElement {
     const generation = ++this.initGeneration;
     initDebugConsole();
 
-    const haUrl = hass.auth.data.hassUrl.replace(/\/+$/, "");
+    const haUrl = normalizeUrl(hass.auth.data.hassUrl);
     debugLog("auth", "Panel connected to " + haUrl);
 
+    const treeContainer = this.container.querySelector("#tree") as HTMLDivElement;
+    for (const [entityId, state] of Object.entries(hass.states ?? {})) {
+      if (isHaState(state)) this.states.set(entityId, state);
+    }
+
     try {
-      const registries = await fetchRegistries(hass.connection);
-      if (generation !== this.initGeneration) return;
-      const root = buildTree(registries);
-      const nodes = flattenTree(root);
-
-      const treeContainer = this.container.querySelector("#tree") as HTMLDivElement;
-      treeContainer.innerHTML = "";
-
-      const forceViz = createForceViz(registries, haUrl, hass.connection);
-
-      const vizContainer = document.createElement("div");
-      vizContainer.id = "viz-container";
-      treeContainer.appendChild(vizContainer);
-      forceViz.create(vizContainer, root, this.states);
-
-      const unsubscribeStates = subscribeToStates(hass.connection, this.states, forceViz);
-      const unwatchConnection = watchConnection(hass.connection, {
-        onDisconnected: () => setStatusDisconnected(true),
-        onReady: () => {
-          setStatusDisconnected(false);
-          fetchAllStates(hass.connection, this.states, forceViz);
-        },
-      });
-
       // The connection outlives this panel (it belongs to the HA frontend),
-      // so detach everything when the panel is removed from the DOM.
-      this.teardown = () => {
-        unsubscribeStates();
-        unwatchConnection();
-        forceViz.destroy();
-      };
-
-      debugLog("system", `Loaded ${nodes.length} nodes across ${registries.areas.length} areas`);
-      showStatusBar(`${nodes.length} nodes | ${registries.areas.length} areas`);
+      // so the teardown only detaches our subscription and listeners.
+      const teardown = await startSession({
+        connection: hass.connection,
+        container: treeContainer,
+        states: this.states,
+        haUrl,
+        isCurrent: () => generation === this.initGeneration,
+      });
+      if (teardown) this.teardown = teardown;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load";
       debugLog("system", "Init failed: " + message);
-      const treeContainer = this.container.querySelector("#tree") as HTMLDivElement;
-      treeContainer.innerHTML = `<div class="loading"><span>${message}</span></div>`;
+      const wrapper = document.createElement("div");
+      wrapper.className = "loading";
+      const span = document.createElement("span");
+      span.textContent = message;
+      wrapper.appendChild(span);
+      treeContainer.replaceChildren(wrapper);
     }
   }
+}
+
+function isHaState(value: unknown): value is HaState {
+  const state = value as HaState | null;
+  return (
+    typeof state === "object" && state !== null &&
+    typeof state.entity_id === "string" &&
+    typeof state.state === "string" &&
+    typeof state.last_changed === "string"
+  );
 }
 
 customElements.define("ha-panel-hypertree", HypertreePanel);

@@ -6,7 +6,11 @@ let fpsEl: HTMLElement | null = null;
 let visible = false;
 
 function ensurePanel(): void {
-  if (panel) return;
+  if (panel) {
+    const root = getRootElement();
+    if (panel.parentElement !== root) root.appendChild(panel);
+    return;
+  }
 
   panel = document.createElement("div");
   panel.id = "debug-console";
@@ -41,8 +45,9 @@ function ensurePanel(): void {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "`" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      // e.target is retargeted to the shadow host; the real origin is composedPath()[0].
+      const target = e.composedPath()[0] as HTMLElement | undefined;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
       e.preventDefault();
       toggle();
     }

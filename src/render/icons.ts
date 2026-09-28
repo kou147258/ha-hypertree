@@ -89,6 +89,7 @@ async function tryHaIcon(name: string): Promise<ResolvedIcon | null> {
   el.style.position = "absolute";
   el.style.visibility = "hidden";
   el.style.pointerEvents = "none";
+  // ha-icon needs the HA frontend's light DOM context to resolve icons, so not getRootElement().
   document.body.appendChild(el);
   try {
     for (let i = 0; i < 60; i++) {

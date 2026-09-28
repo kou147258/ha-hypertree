@@ -18,13 +18,11 @@ export function renderLoginForm(
       <p>Connect to your Home Assistant instance</p>
       <label>
         Home Assistant URL
-        <input type="url" id="ha-url" placeholder="https://homeassistant.local:8123"
-               value="${saved?.url ?? ""}" required />
+        <input type="url" id="ha-url" placeholder="https://homeassistant.local:8123" required />
       </label>
       <label>
         Long-Lived Access Token
-        <input type="password" id="ha-token" placeholder="eyJhbGciOi..."
-               value="${saved?.token ?? ""}" required />
+        <input type="password" id="ha-token" placeholder="eyJhbGciOi..." required />
       </label>
       <p id="protocol-warning" class="protocol-warning" hidden></p>
       <button type="submit">Connect</button>
@@ -54,6 +52,9 @@ export function renderLoginForm(
 
   const form = container.querySelector("#login-form") as HTMLFormElement;
   const urlInput = container.querySelector("#ha-url") as HTMLInputElement;
+  const tokenInput = container.querySelector("#ha-token") as HTMLInputElement;
+  urlInput.value = saved?.url ?? "";
+  tokenInput.value = saved?.token ?? "";
   const protocolWarning = container.querySelector("#protocol-warning") as HTMLElement;
 
   function checkProtocolMismatch(): void {
@@ -80,7 +81,7 @@ export function renderLoginForm(
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const url = urlInput.value.trim();
-    const token = (container.querySelector("#ha-token") as HTMLInputElement).value.trim();
+    const token = tokenInput.value.trim();
     const creds = { url, token };
     saveCredentials(creds);
     onSubmit(creds);
