@@ -22,6 +22,7 @@ class HypertreePanel extends HTMLElement {
   private teardown: (() => void) | null = null;
   private states = new Map<string, HaState>();
   private container!: HTMLDivElement;
+  private menuButton!: HTMLButtonElement;
 
   constructor() {
     super();
@@ -39,6 +40,16 @@ class HypertreePanel extends HTMLElement {
     this.container.appendChild(tree);
     shadow.appendChild(this.container);
 
+    this.menuButton = document.createElement("button");
+    this.menuButton.className = "ha-menu-button";
+    this.menuButton.title = "Menu";
+    this.menuButton.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>';
+    // Same event HA's own ha-menu-button fires; composed so it leaves the shadow root.
+    this.menuButton.addEventListener("click", () => {
+      this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
+    });
+    shadow.appendChild(this.menuButton);
+
     setRootElement(this.container);
   }
 
@@ -47,6 +58,10 @@ class HypertreePanel extends HTMLElement {
       this.initialized = true;
       this.initPanel(hass);
     }
+  }
+
+  set narrow(narrow: boolean) {
+    this.menuButton.classList.toggle("visible", narrow);
   }
 
   disconnectedCallback() {
