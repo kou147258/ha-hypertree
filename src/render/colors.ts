@@ -68,7 +68,7 @@ export function saveColors(): void {
 
 export function nodeColor(kind: string, domain?: string): string {
   if (kind === "entity" || kind === "domain") {
-    return (domain && DOMAIN_COLORS[domain]) ?? DEFAULT_COLOR;
+    return (domain && DOMAIN_COLORS[domain]) || DEFAULT_COLOR;
   }
   return KIND_COLORS[kind] ?? DEFAULT_COLOR;
 }
@@ -77,8 +77,7 @@ function randomHslColor(): string {
   const h = Math.floor(Math.random() * 360);
   const s = 50 + Math.floor(Math.random() * 40);
   const l = 45 + Math.floor(Math.random() * 25);
-  const r = hslToHex(h, s, l);
-  return r;
+  return hslToHex(h, s, l);
 }
 
 function hslToHex(h: number, s: number, l: number): string {
@@ -110,7 +109,7 @@ export function getDomainColors(): Record<string, string> {
 
 export function setDomainColors(colors: Record<string, string>): void {
   for (const [key, value] of Object.entries(colors)) {
-    if (key in DOMAIN_COLORS) DOMAIN_COLORS[key] = value;
+    if (key in DOMAIN_COLORS && typeof value === "string") DOMAIN_COLORS[key] = value;
   }
   saveColors();
 }

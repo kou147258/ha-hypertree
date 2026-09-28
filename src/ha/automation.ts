@@ -48,10 +48,21 @@ function extractEntityIds(obj: unknown, found: Set<string>): void {
 
 const BATCH_SIZE = 10;
 
+function describeReason(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  if (typeof reason === "string") return reason;
+  try {
+    return JSON.stringify(reason);
+  } catch {
+    return String(reason);
+  }
+}
+
 export async function fetchAutomationEdges(
   connection: Connection,
   automationEntityIds: string[],
   knownEntityIds: Set<string>,
+  onAbort?: (failedCount: number) => void,
 ): Promise<AutomationEdge[]> {
   const edges: AutomationEdge[] = [];
 
@@ -72,7 +83,7 @@ export async function fetchAutomationEdges(
       const result = results[j];
       if (result.status !== "fulfilled") {
         rejected++;
-        if (rejected === 1) debugLog("system", `Automation: first rejection for ${batch[j]}`, result.reason);
+        if (rejected === 1) debugLog("system", `Automation: first rejection for ${batch[j]}`, describeReason(result.reason));
         continue;
       }
       fulfilled++;
@@ -102,6 +113,14 @@ export async function fetchAutomationEdges(
       }
     }
     debugLog("system", `Automation: batch ${i / BATCH_SIZE + 1}: ${fulfilled} ok, ${rejected} failed`);
+    // A fully failed batch usually means the connection or permissions are
+    // gone; the remaining batches would fail the same way.
+    if (fulfilled === 0 && rejected > 0) {
+      const failedCount = automationEntityIds.length - i;
+      debugLog("system", `Automation: aborting, ${failedCount} automations not loaded`);
+      onAbort?.(failedCount);
+      break;
+    }
   }
 
   return edges;
