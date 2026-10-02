@@ -4,7 +4,8 @@ import type { HaState, Registries } from "../ha/types";
 import { showTooltip, hideTooltip } from "../render/tooltip";
 import { nodeColor, randomizeColors, resetColors, getDomainColors, setDomainColors, setDomainColor, domainList } from "../render/colors";
 import { getEntityIconName, getCachedIcon, requestIcon, setIconResolveCallback } from "../render/icons";
-import { createTransform, applyWheel, zoomAt, screenToWorld, type ZoomTransform } from "./zoom";
+import { createTransform, applyWheel, zoomAt, screenToWorld, fitTransform, type ZoomTransform } from "./zoom";
+import { limitStep as limitStepVec, needsRescue } from "./stability";
 import { buildTree, buildTreeByDevice, flattenTree } from "../tree/build";
 import { loadCredentials, saveCredentials } from "../login";
 import { getRootElement } from "../rootElement";
@@ -760,6 +761,15 @@ function buildToolbar(container: HTMLElement): {
   resetPosBtn.title = "Reset positions";
   resetPosBtn.addEventListener("click", () => rebuildGraph());
   toolbar.appendChild(resetPosBtn);
+
+  // The escape hatch for a lost view: the layout can settle outside the
+  // viewport, and neither Reset positions nor a zoom limit gets it back.
+  const fitBtn = document.createElement("button");
+  fitBtn.className = "canvas-toolbar-btn";
+  fitBtn.title = "Fit view to graph";
+  fitBtn.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 5.5v-4h4"/><path d="M14.5 5.5v-4h-4"/><path d="M1.5 10.5v4h4"/><path d="M14.5 10.5v4h-4"/></svg>';
+  fitBtn.addEventListener("click", () => fitAll());
+  toolbar.appendChild(fitBtn);
 
   const gearBtn = document.createElement("button");
   gearBtn.className = "canvas-toolbar-btn";
@@ -1842,6 +1852,10 @@ function buildGraph(root: TreeNode): void {
       alpha *= ALPHA_DECAY;
     }
   }
+  // The default transform is the identity, which cannot frame a graph that is
+  // wider than the viewport. Arm the fit so resize() frames it once the
+  // container has a real size.
+  pendingFit = true;
 }
 
 function renderScale(): number {
@@ -1860,6 +1874,9 @@ function resize(): void {
   canvas.height = height * dpr;
   // Setting canvas.width clears the bitmap, so repaint even when idle.
   ensureLoop();
+  // Frame the graph only right after it was (re)built, never on an ordinary
+  // window resize - that would throw away the user's pan and zoom.
+  if (pendingFit) fitAll();
 }
 
 function tick(): void {
@@ -1964,6 +1981,51 @@ function quadPush(quad: QuadNode, fn: FNode, depth: number): void {
 
 const BH_THETA = 0.9;
 
+// Set when the graph was rebuilt and the view has not been framed yet.
+let pendingFit = true;
+
+/** Apply the per-tick step cap in place. */
+function limitStep(n: FNode): void {
+  const v = limitStepVec(n.vx, n.vy);
+  n.vx = v.vx;
+  n.vy = v.vy;
+}
+
+/** Put a node that overflowed to float back on the leash. */
+function rescueNode(n: FNode): void {
+  n.x = width / 2 || 400;
+  n.y = height / 2 || 300;
+  n.vx = 0;
+  n.vy = 0;
+}
+
+/** World-space bounding box of every laid-out node. */
+function graphBounds(): { minX: number; minY: number; maxX: number; maxY: number } {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of fnodes) {
+    if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) continue;
+    if (n.x < minX) minX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.x > maxX) maxX = n.x;
+    if (n.y > maxY) maxY = n.y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/** Frame the whole graph. Also the manual recovery path when the view is lost. */
+function fitAll(): void {
+  if (fnodes.length === 0) return;
+  const box = graphBounds();
+  // Stay armed if the fit did not take: a panel that is still 0x0 (not yet
+  // laid out, or hidden) would otherwise consume the pending fit and leave
+  // the view unframed forever.
+  if (!fitTransform(transform, box, width, height)) return;
+  pendingFit = false;
+  updateViewBounds();
+  debugLog("system", `Fit view: k=${transform.k.toFixed(3)} for ${fnodes.length} nodes`);
+  ensureLoop();
+}
+
 function quadRepulse(quad: QuadNode, fn: FNode, ra: number): void {
   if (quad.count === 0) return;
 
@@ -2037,9 +2099,12 @@ function simulate(): void {
 
   for (const n of fnodes) {
     if (n.fx !== null) { n.x = n.fx; n.vx = 0; }
-    else { n.vx *= settings.damping; n.x += n.vx; }
+    else { n.vx *= settings.damping; limitStep(n); n.x += n.vx; }
     if (n.fy !== null) { n.y = n.fy; n.vy = 0; }
-    else { n.vy *= settings.damping; n.y += n.vy; }
+    else { n.vy *= settings.damping; limitStep(n); n.y += n.vy; }
+    // A node the user is dragging has fx/fy pinned and a zero velocity, so it
+    // can never trip either guard below.
+    if (needsRescue(n.x, n.y)) rescueNode(n);
   }
 }
 
