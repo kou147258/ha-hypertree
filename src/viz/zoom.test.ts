@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createTransform, fitTransform, screenToWorld, wheelZoomFactor, zoomAt } from "./zoom";
+import { createTransform, fitTransform, screenToWorld, wheelZoomFactor, zoomAt, MIN_ZOOM } from "./zoom";
 
 describe("zoomAt", () => {
   it("keeps the world point under the zoom center fixed", () => {
@@ -17,7 +17,7 @@ describe("zoomAt", () => {
     zoomAt(t, 1000, 0, 0);
     expect(t.k).toBe(20);
     zoomAt(t, 0.00001, 0, 0);
-    expect(t.k).toBe(0.1);
+    expect(t.k).toBe(MIN_ZOOM);
   });
 });
 
@@ -74,6 +74,18 @@ describe("fitTransform", () => {
     fitTransform(t, { minX: 5, minY: 5, maxX: 5, maxY: 5 }, 1000, 800);
     expect(t.k).toBeGreaterThan(0);
     expect(Number.isFinite(t.k)).toBe(true);
+  });
+
+  it("frames a very large graph - the floor has to be low enough", () => {
+    // A 50k-node layout settles around 10,000 world units wide, which needs
+    // k ~ 0.08. With the old 0.1 floor the fit silently clamped and left part
+    // of the graph off screen.
+    const box = { minX: -5000, minY: -5000, maxX: 5000, maxY: 5000 };
+    const t = createTransform();
+    expect(fitTransform(t, box, 1200, 800)).toBe(true);
+    const kNeeded = Math.min((1200 - 80) / 10000, (800 - 80) / 10000);
+    expect(t.k).toBeLessThanOrEqual(kNeeded + 1e-9);
+    expect(t.k).toBeGreaterThanOrEqual(MIN_ZOOM);
   });
 
   it("refuses to fit into a viewport that has no size yet", () => {

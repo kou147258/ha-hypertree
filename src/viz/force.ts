@@ -1857,9 +1857,16 @@ function buildGraph(root: TreeNode): void {
   rebuildClusters();
 
   if (settings.initialLayout === "tree") {
-    for (let i = 0; i < 150; i++) {
+    // Warm-up is a synchronous block on the main thread, so a fixed tick count
+    // turns into a visible freeze that grows with the instance: 150 ticks cost
+    // ~0.6s at 3.7k nodes, ~4s at 20k and ~14s at 50k. Spend a wall-clock
+    // budget instead, and let the render loop carry on settling afterwards -
+    // alpha is still well above the cutoff, so nothing is left half-baked.
+    const warmupStart = performance.now();
+    for (let i = 0; i < WARMUP_TICKS; i++) {
       simulate();
       alpha *= ALPHA_DECAY;
+      if (performance.now() - warmupStart > WARMUP_BUDGET_MS) break;
     }
   }
   // The default transform is the identity, which cannot frame a graph that is
@@ -1993,6 +2000,13 @@ const BH_THETA = 0.9;
 
 // Set when the graph was rebuilt and the view has not been framed yet.
 let pendingFit = true;
+
+const WARMUP_TICKS = 150;
+// Wall-clock ceiling for the synchronous pre-render warm-up. Small instances
+// never reach it and still get all 150 ticks; large ones stop early instead of
+// freezing the tab, and carry on settling in the render loop - alpha is still
+// far above the cutoff when the budget runs out.
+const WARMUP_BUDGET_MS = 1200;
 
 /** Apply the per-tick step cap in place. */
 function limitStep(n: FNode): void {

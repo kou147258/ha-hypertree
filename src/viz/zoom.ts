@@ -11,7 +11,12 @@ const WHEEL_DELTA_LINE = 1;
 const WHEEL_DELTA_PAGE = 2;
 const LINE_HEIGHT_PX = 16;
 const PAGE_HEIGHT_PX = 800;
-const MIN_ZOOM = 0.1;
+// Low enough that fitAll() can still frame a very large graph: a 50k-node
+// layout settles around 10,000 world units wide, which needs k ~ 0.08. Text
+// is not a problem at these scales because entity labels are already hidden
+// below settings.entityLabelZoom, and the tiered label thresholds in
+// drawLabels() fade the rest out.
+const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 20;
 export { MIN_ZOOM, MAX_ZOOM };
 
